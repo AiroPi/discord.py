@@ -66,6 +66,7 @@ __all__ = (
     'AutoModRuleTriggerType',
     'AutoModRuleEventType',
     'AutoModRuleActionType',
+    'ForumLayoutType',
 )
 
 if TYPE_CHECKING:
@@ -231,6 +232,14 @@ class MessageType(Enum):
     guild_invite_reminder = 22
     context_menu_command = 23
     auto_moderation_action = 24
+    role_subscription_purchase = 25
+    interaction_premium_upsell = 26
+    # stage_start = 27
+    # stage_end = 28
+    # stage_speaker = 29
+    # stage_raise_hand = 30
+    # stage_topic = 31
+    guild_application_premium_subscription = 32
 
 
 class SpeakingState(Enum):
@@ -355,6 +364,8 @@ class AuditLogAction(Enum):
     automod_rule_update           = 141
     automod_rule_delete           = 142
     automod_block_message         = 143
+    automod_flag_message          = 144
+    automod_timeout_member        = 145
     # fmt: on
 
     @property
@@ -413,6 +424,8 @@ class AuditLogAction(Enum):
             AuditLogAction.automod_rule_update:           AuditLogActionCategory.update,
             AuditLogAction.automod_rule_delete:           AuditLogActionCategory.delete,
             AuditLogAction.automod_block_message:         None,
+            AuditLogAction.automod_flag_message:          None,
+            AuditLogAction.automod_timeout_member:        None,
         }
         # fmt: on
         return lookup[self]
@@ -454,7 +467,7 @@ class AuditLogAction(Enum):
             return 'integration_or_app_command'
         elif v < 143:
             return 'auto_moderation'
-        elif v == 143:
+        elif v < 146:
             return 'user'
 
 
@@ -478,6 +491,7 @@ class UserFlags(Enum):
     discord_certified_moderator = 262144
     bot_http_interactions = 524288
     spammer = 1048576
+    active_developer = 4194304
 
 
 class ActivityType(Enum):
@@ -521,6 +535,7 @@ class StickerFormatType(Enum):
     png = 1
     apng = 2
     lottie = 3
+    gif = 4
 
     @property
     def file_extension(self) -> str:
@@ -529,6 +544,7 @@ class StickerFormatType(Enum):
             StickerFormatType.png: 'png',
             StickerFormatType.apng: 'png',
             StickerFormatType.lottie: 'json',
+            StickerFormatType.gif: 'gif',
         }
         # fmt: on
         return lookup[self]
@@ -572,7 +588,12 @@ class ComponentType(Enum):
     action_row = 1
     button = 2
     select = 3
+    string_select = 3
     text_input = 4
+    user_select = 5
+    role_select = 6
+    mentionable_select = 7
+    channel_select = 8
 
     def __int__(self) -> int:
         return self.value
@@ -632,6 +653,7 @@ class Locale(Enum):
     taiwan_chinese = 'zh-TW'
     croatian = 'hr'
     czech = 'cs'
+    indonesian = 'id'
     danish = 'da'
     dutch = 'nl'
     finnish = 'fi'
@@ -710,6 +732,7 @@ class AutoModRuleTriggerType(Enum):
     harmful_link = 2
     spam = 3
     keyword_preset = 4
+    mention_spam = 5
 
 
 class AutoModRuleEventType(Enum):
@@ -720,6 +743,12 @@ class AutoModRuleActionType(Enum):
     block_message = 1
     send_alert_message = 2
     timeout = 3
+
+
+class ForumLayoutType(Enum):
+    not_set = 0
+    list_view = 1
+    gallery_view = 2
 
 
 def create_unknown_value(cls: Type[E], val: Any) -> E:

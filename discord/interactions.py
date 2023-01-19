@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, Optional, TYPE_CHECKING, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Generic, TYPE_CHECKING, Sequence, Tuple, Union
 import asyncio
 import datetime
 
@@ -34,6 +34,7 @@ from .enums import try_enum, Locale, InteractionType, InteractionResponseType
 from .errors import InteractionResponded, HTTPException, ClientException, DiscordException
 from .flags import MessageFlags
 from .channel import PartialMessageable, ChannelType
+from ._types import ClientT
 
 from .user import User
 from .member import Member
@@ -42,6 +43,7 @@ from .permissions import Permissions
 from .http import handle_message_parameters
 from .webhook.async_ import async_context, Webhook, interaction_response_params, interaction_message_response_params
 from .app_commands.namespace import Namespace
+from .app_commands.translator import locale_str, TranslationContext, TranslationContextLocation
 
 __all__ = (
     'Interaction',
@@ -58,7 +60,6 @@ if TYPE_CHECKING:
     from .types.webhook import (
         Webhook as WebhookPayload,
     )
-    from .client import Client
     from .guild import Guild
     from .state import ConnectionState
     from .file import File
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
 MISSING: Any = utils.MISSING
 
 
-class Interaction:
+class Interaction(Generic[ClientT]):
     """Represents a Discord interaction.
 
     An interaction happens when a user does an action that needs to
@@ -116,6 +117,9 @@ class Interaction:
         A dictionary that can be used to store extraneous data for use during
         interaction processing. The library will not touch any values or keys
         within this dictionary.
+    command_failed: :class:`bool`
+        Whether the command associated with this interaction failed to execute.
+        This includes checks and execution.
     """
 
     __slots__: Tuple[str, ...] = (
@@ -132,6 +136,7 @@ class Interaction:
         'locale',
         'guild_locale',
         'extras',
+        'command_failed',
         '_permissions',
         '_app_permissions',
         '_state',
@@ -146,15 +151,16 @@ class Interaction:
         '_cs_command',
     )
 
-    def __init__(self, *, data: InteractionPayload, state: ConnectionState):
-        self._state: ConnectionState = state
-        self._client: Client = state._get_client()
+    def __init__(self, *, data: InteractionPayload, state: ConnectionState[ClientT]):
+        self._state: ConnectionState[ClientT] = state
+        self._client: ClientT = state._get_client()
         self._session: ClientSession = state.http._HTTPClient__session  # type: ignore # Mangled attribute for __session
         self._original_response: Optional[InteractionMessage] = None
         # This baton is used for extra data that might be useful for the lifecycle of
         # an interaction. This is mainly for internal purposes and it gives it a free-for-all slot.
         self._baton: Any = MISSING
         self.extras: Dict[Any, Any] = {}
+        self.command_failed: bool = False
         self._from_data(data)
 
     def _from_data(self, data: InteractionPayload):
@@ -201,7 +207,7 @@ class Interaction:
                 pass
 
     @property
-    def client(self) -> Client:
+    def client(self) -> ClientT:
         """:class:`Client`: The client that is handling this interaction.
 
         Note that :class:`AutoShardedClient`, :class:`~.commands.Bot`, and
@@ -296,7 +302,7 @@ class Interaction:
             return tree._get_context_menu(data)
 
     @utils.cached_slot_property('_cs_response')
-    def response(self) -> InteractionResponse:
+    def response(self) -> InteractionResponse[ClientT]:
         """:class:`InteractionResponse`: Returns an object responsible for handling responding to the interaction.
 
         A response can only be done once. If secondary messages need to be sent, consider using :attr:`followup`
@@ -498,8 +504,51 @@ class Interaction:
             proxy_auth=http.proxy_auth,
         )
 
+    async def translate(
+        self, string: Union[str, locale_str], *, locale: Locale = MISSING, data: Any = MISSING
+    ) -> Optional[str]:
+        """|coro|
 
-class InteractionResponse:
+        Translates a string using the set :class:`~discord.app_commands.Translator`.
+
+        .. versionadded:: 2.1
+
+        Parameters
+        ----------
+        string: Union[:class:`str`, :class:`~discord.app_commands.locale_str`]
+            The string to translate.
+            :class:`~discord.app_commands.locale_str` can be used to add more context,
+            information, or any metadata necessary.
+        locale: :class:`Locale`
+            The locale to use, this is handy if you want the translation
+            for a specific locale.
+            Defaults to the user's :attr:`.locale`.
+        data: Any
+            The extraneous data that is being translated.
+            If not specified, either :attr:`.command` or :attr:`.message` will be passed,
+            depending on which is available in the context.
+
+        Returns
+        --------
+        Optional[:class:`str`]
+            The translated string, or ``None`` if a translator was not set.
+        """
+        translator = self._state._translator
+        if not translator:
+            return None
+
+        if not isinstance(string, locale_str):
+            string = locale_str(string)
+        if locale is MISSING:
+            locale = self.locale
+        if data is MISSING:
+            data = self.command or self.message
+
+        context = TranslationContext(location=TranslationContextLocation.other, data=data)
+        return await translator.translate(string, locale=locale, context=context)
+
+
+class InteractionResponse(Generic[ClientT]):
     """Represents a Discord interaction response.
 
     This type can be accessed through :attr:`Interaction.response`.
@@ -512,8 +561,8 @@ class InteractionResponse:
         '_parent',
     )
 
-    def __init__(self, parent: Interaction):
-        self._parent: Interaction = parent
+    def __init__(self, parent: Interaction[ClientT]):
+        self._parent: Interaction[ClientT] = parent
         self._response_type: Optional[InteractionResponseType] = None
 
     def is_done(self) -> bool:
@@ -639,6 +688,7 @@ class InteractionResponse:
         ephemeral: bool = False,
         allowed_mentions: AllowedMentions = MISSING,
         suppress_embeds: bool = False,
+        delete_after: Optional[float] = None,
     ) -> None:
         """|coro|
 
@@ -671,6 +721,12 @@ class InteractionResponse:
             more information.
         suppress_embeds: :class:`bool`
             Whether to suppress embeds for the message. This sends the message without any embeds if set to ``True``.
+        delete_after: :class:`float`
+            If provided, the number of seconds to wait in the background
+            before deleting the message we just sent. If the deletion fails,
+            then it is silently ignored.
+
+            .. versionadded:: 2.1
 
         Raises
         -------
@@ -730,6 +786,17 @@ class InteractionResponse:
 
         self._response_type = InteractionResponseType.channel_message
 
+        if delete_after is not None:
+
+            async def inner_call(delay: float = delete_after):
+                await asyncio.sleep(delay)
+                try:
+                    await self._parent.delete_original_response()
+                except HTTPException:
+                    pass
+
+            asyncio.create_task(inner_call())
+
     async def edit_message(
         self,
         *,
@@ -739,6 +806,7 @@ class InteractionResponse:
         attachments: Sequence[Union[Attachment, File]] = MISSING,
         view: Optional[View] = MISSING,
         allowed_mentions: Optional[AllowedMentions] = MISSING,
+        delete_after: Optional[float] = None,
     ) -> None:
         """|coro|
 
@@ -768,6 +836,12 @@ class InteractionResponse:
         allowed_mentions: Optional[:class:`~discord.AllowedMentions`]
             Controls the mentions being processed in this message. See :meth:`.Message.edit`
             for more information.
+        delete_after: :class:`float`
+            If provided, the number of seconds to wait in the background
+            before deleting the message we just edited. If the deletion fails,
+            then it is silently ignored.
+
+            .. versionadded:: 2.2
 
         Raises
         -------
@@ -817,6 +891,17 @@ class InteractionResponse:
             state.store_view(view, message_id)
 
         self._response_type = InteractionResponseType.message_update
+
+        if delete_after is not None:
+
+            async def inner_call(delay: float = delete_after):
+                await asyncio.sleep(delay)
+                try:
+                    await self._parent.delete_original_response()
+                except HTTPException:
+                    pass
+
+            asyncio.create_task(inner_call())
 
     async def send_modal(self, modal: Modal, /) -> None:
         """|coro|

@@ -41,6 +41,7 @@ from typing import (
     Dict,
     TYPE_CHECKING,
     Optional,
+    Sequence,
     TypeVar,
     Type,
     Union,
@@ -189,7 +190,7 @@ class BotBase(GroupMixin[None]):
             raise TypeError('Both owner_id and owner_ids are set.')
 
         if self.owner_ids and not isinstance(self.owner_ids, collections.abc.Collection):
-            raise TypeError(f'owner_ids must be a collection not {self.owner_ids.__class__!r}')
+            raise TypeError(f'owner_ids must be a collection not {self.owner_ids.__class__.__name__}')
 
         if help_command is _default:
             self.help_command = DefaultHelpCommand()
@@ -197,6 +198,23 @@ class BotBase(GroupMixin[None]):
             self.help_command = help_command
 
     # internal helpers
+
+    async def _async_setup_hook(self) -> None:
+        # self/super() resolves to Client/AutoShardedClient
+        await super()._async_setup_hook()  # type: ignore
+        prefix = self.command_prefix
+
+        # This has to be here because for the default logging set up to capture
+        # the logging calls, they have to come after the `Client.run` call.
+        # The best place to do this is in an async init scenario
+        if not self.intents.message_content:  # type: ignore
+            trigger_warning = (
+                (callable(prefix) and prefix is not when_mentioned)
+                or isinstance(prefix, str)
+                or (isinstance(prefix, collections.abc.Iterable) and len(list(prefix)) >= 1)
+            )
+            if trigger_warning:
+                _log.warning('Privileged message content intent is missing, commands may not work as expected.')
 
     def dispatch(self, event_name: str, /, *args: Any, **kwargs: Any) -> None:
         # super() will resolve to Client
@@ -686,7 +704,7 @@ class BotBase(GroupMixin[None]):
         *,
         override: bool = False,
         guild: Optional[Snowflake] = MISSING,
-        guilds: List[Snowflake] = MISSING,
+        guilds: Sequence[Snowflake] = MISSING,
     ) -> None:
         """|coro|
 
@@ -794,7 +812,7 @@ class BotBase(GroupMixin[None]):
         /,
         *,
         guild: Optional[Snowflake] = MISSING,
-        guilds: List[Snowflake] = MISSING,
+        guilds: Sequence[Snowflake] = MISSING,
     ) -> Optional[Cog]:
         """|coro|
 
@@ -1042,7 +1060,9 @@ class BotBase(GroupMixin[None]):
         await self._call_module_finalizers(lib, name)
 
     async def reload_extension(self, name: str, *, package: Optional[str] = None) -> None:
-        """Atomically reloads an extension.
+        """|coro|
+
+        Atomically reloads an extension.
 
         This replaces the extension with the same extension, only refreshed. This is
         equivalent to a :meth:`unload_extension` followed by a :meth:`load_extension`

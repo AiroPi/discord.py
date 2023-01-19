@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         MessageReference as MessageReferencePayload,
         MessageApplication as MessageApplicationPayload,
         MessageActivity as MessageActivityPayload,
+        RoleSubscriptionData as RoleSubscriptionDataPayload,
     )
 
     from .types.interactions import MessageInteraction as MessageInteractionPayload
@@ -108,6 +109,7 @@ __all__ = (
     'MessageReference',
     'DeletedReferencedMessage',
     'MessageApplication',
+    'RoleSubscriptionInfo',
 )
 
 
@@ -657,6 +659,39 @@ class MessageApplication:
         return None
 
 
+class RoleSubscriptionInfo:
+    """Represents a message's role subscription information.
+
+    This is currently only attached to messages of type :attr:`MessageType.role_subscription_purchase`.
+
+    .. versionadded:: 2.0
+
+    Attributes
+    -----------
+    role_subscription_listing_id: :class:`int`
+        The ID of the SKU and listing that the user is subscribed to.
+    tier_name: :class:`str`
+        The name of the tier that the user is subscribed to.
+    total_months_subscribed: :class:`int`
+        The cumulative number of months that the user has been subscribed for.
+    is_renewal: :class:`bool`
+        Whether this notification is for a renewal rather than a new purchase.
+    """
+
+    __slots__ = (
+        'role_subscription_listing_id',
+        'tier_name',
+        'total_months_subscribed',
+        'is_renewal',
+    )
+
+    def __init__(self, data: RoleSubscriptionDataPayload) -> None:
+        self.role_subscription_listing_id: int = int(data['role_subscription_listing_id'])
+        self.tier_name: str = data['tier_name']
+        self.total_months_subscribed: int = data['total_months_subscribed']
+        self.is_renewal: bool = data['is_renewal']
+
+
 class PartialMessage(Hashable):
     """Represents a partial message to aid with working messages when only
     a message and channel ID are present.
@@ -771,8 +806,7 @@ class PartialMessage(Hashable):
         Deletes the message.
 
         Your own messages could be deleted without any proper permissions. However to
-        delete other people's messages, you need the :attr:`~Permissions.manage_messages`
-        permission.
+        delete other people's messages, you must have :attr:`~Permissions.manage_messages`.
 
         .. versionchanged:: 1.1
             Added the new ``delay`` keyword-only parameter.
@@ -947,10 +981,10 @@ class PartialMessage(Hashable):
 
         Publishes this message to your announcement channel.
 
-        You must have the :attr:`~Permissions.send_messages` permission to do this.
+        You must have :attr:`~Permissions.send_messages` to do this.
 
-        If the message is not your own then the :attr:`~Permissions.manage_messages`
-        permission is also needed.
+        If the message is not your own then :attr:`~Permissions.manage_messages`
+        is also needed.
 
         Raises
         -------
@@ -967,7 +1001,7 @@ class PartialMessage(Hashable):
 
         Pins the message.
 
-        You must have the :attr:`~Permissions.manage_messages` permission to do
+        You must have :attr:`~Permissions.manage_messages` to do
         this in a non-private channel context.
 
         Parameters
@@ -997,7 +1031,7 @@ class PartialMessage(Hashable):
 
         Unpins the message.
 
-        You must have the :attr:`~Permissions.manage_messages` permission to do
+        You must have :attr:`~Permissions.manage_messages` to do
         this in a non-private channel context.
 
         Parameters
@@ -1028,9 +1062,9 @@ class PartialMessage(Hashable):
 
         The emoji may be a unicode emoji or a custom guild :class:`Emoji`.
 
-        You must have the :attr:`~Permissions.read_message_history` permission
-        to use this. If nobody else has reacted to the message using this
-        emoji, the :attr:`~Permissions.add_reactions` permission is required.
+        You must have :attr:`~Permissions.read_message_history`
+        to do this. If nobody else has reacted to the message using this
+        emoji, :attr:`~Permissions.add_reactions` is required.
 
         .. versionchanged:: 2.0
 
@@ -1068,7 +1102,7 @@ class PartialMessage(Hashable):
         The emoji may be a unicode emoji or a custom guild :class:`Emoji`.
 
         If the reaction is not your own (i.e. ``member`` parameter is not you) then
-        the :attr:`~Permissions.manage_messages` permission is needed.
+        :attr:`~Permissions.manage_messages` is needed.
 
         The ``member`` parameter must represent a member and meet
         the :class:`abc.Snowflake` abc.
@@ -1110,7 +1144,7 @@ class PartialMessage(Hashable):
 
         The emoji may be a unicode emoji or a custom guild :class:`Emoji`.
 
-        You need the :attr:`~Permissions.manage_messages` permission to use this.
+        You must have :attr:`~Permissions.manage_messages` to do this.
 
         .. versionadded:: 1.3
 
@@ -1143,7 +1177,7 @@ class PartialMessage(Hashable):
 
         Removes all the reactions from the message.
 
-        You need the :attr:`~Permissions.manage_messages` permission to use this.
+        You must have :attr:`~Permissions.manage_messages` to do this.
 
         Raises
         --------
@@ -1182,7 +1216,7 @@ class PartialMessage(Hashable):
             If not provided, the channel's default auto archive duration is used.
         slowmode_delay: Optional[:class:`int`]
             Specifies the slowmode rate limit for user in this channel, in seconds.
-            The maximum value possible is `21600`. By default no slowmode rate limit
+            The maximum value possible is ``21600``. By default no slowmode rate limit
             if this is ``None``.
         reason: Optional[:class:`str`]
             The reason for creating a new thread. Shows up on the audit log.
@@ -1400,6 +1434,11 @@ class Message(PartialMessage, Hashable):
         The interaction that this message is a response to.
 
         .. versionadded:: 2.0
+    role_subscription: Optional[:class:`RoleSubscriptionInfo`]
+        The data of the role subscription purchase or renewal that prompted this
+        :attr:`MessageType.role_subscription_purchase` message.
+
+        .. versionadded:: 2.2
     guild: Optional[:class:`Guild`]
         The guild that the message belongs to, if applicable.
     """
@@ -1432,6 +1471,7 @@ class Message(PartialMessage, Hashable):
         'stickers',
         'components',
         'interaction',
+        'role_subscription',
     )
 
     if TYPE_CHECKING:
@@ -1516,6 +1556,14 @@ class Message(PartialMessage, Hashable):
             pass
         else:
             self.application = MessageApplication(state=self._state, data=application)
+
+        self.role_subscription: Optional[RoleSubscriptionInfo] = None
+        try:
+            role_subscription = data['role_subscription_data']
+        except KeyError:
+            pass
+        else:
+            self.role_subscription = RoleSubscriptionInfo(role_subscription)
 
         for handler in ('author', 'member', 'mentions', 'mention_roles', 'components'):
             try:
@@ -1777,7 +1825,7 @@ class Message(PartialMessage, Hashable):
                 return '@deleted-role'
 
             def resolve_channel(id: int) -> str:
-                return f'#deleted-channel'
+                return '#deleted-channel'
 
         transforms = {
             '@': resolve_member,
@@ -1939,6 +1987,12 @@ class Message(PartialMessage, Hashable):
 
         if self.type is MessageType.guild_invite_reminder:
             return 'Wondering who to invite?\nStart by inviting anyone who can help you build the server!'
+
+        if self.type is MessageType.role_subscription_purchase and self.role_subscription is not None:
+            # TODO: figure out how the message looks like for is_renewal: true
+            total_months = self.role_subscription.total_months_subscribed
+            months = '1 month' if total_months == 1 else f'{total_months} months'
+            return f'{self.author.name} joined {self.role_subscription.tier_name} and has been a subscriber of {self.guild} for {months}!'
 
         # Fallback for unknown message types
         return ''

@@ -39,6 +39,7 @@ from typing import (
     TypeVar,
     Coroutine,
     Sequence,
+    Generic,
     Tuple,
     Deque,
     Literal,
@@ -74,14 +75,15 @@ from .stage_instance import StageInstance
 from .threads import Thread, ThreadMember
 from .sticker import GuildSticker
 from .automod import AutoModRule, AutoModAction
+from .audit_logs import AuditLogEntry
+from ._types import ClientT
 
 if TYPE_CHECKING:
     from .abc import PrivateChannel
     from .message import MessageableChannel
-    from .guild import GuildChannel, VocalGuildChannel
+    from .guild import GuildChannel
     from .http import HTTPClient
     from .voice_client import VoiceProtocol
-    from .client import Client
     from .gateway import DiscordWebSocket
     from .app_commands import CommandTree, Translator
 
@@ -98,7 +100,7 @@ if TYPE_CHECKING:
     from .types.command import GuildApplicationCommandPermissions as GuildApplicationCommandPermissionsPayload
 
     T = TypeVar('T')
-    Channel = Union[GuildChannel, VocalGuildChannel, PrivateChannel, PartialMessageable]
+    Channel = Union[GuildChannel, PrivateChannel, PartialMessageable]
 
 
 class ChunkRequest:
@@ -159,10 +161,10 @@ async def logging_coroutine(coroutine: Coroutine[Any, Any, T], *, info: str) -> 
         _log.exception('Exception occurred during %s', info)
 
 
-class ConnectionState:
+class ConnectionState(Generic[ClientT]):
     if TYPE_CHECKING:
         _get_websocket: Callable[..., DiscordWebSocket]
-        _get_client: Callable[..., Client]
+        _get_client: Callable[..., ClientT]
         _parsers: Dict[str, Callable[[Dict[str, Any]], None]]
 
     def __init__(
@@ -798,7 +800,7 @@ class ConnectionState:
                     for s in guild.scheduled_events:
                         if s.channel_id == channel.id:
                             guild._scheduled_events.pop(s.id)
-                            self.dispatch('scheduled_event_delete', guild, s)
+                            self.dispatch('scheduled_event_delete', s)
 
     def parse_channel_update(self, data: gw.ChannelUpdateEvent) -> None:
         channel_type = try_enum(ChannelType, data.get('type'))
@@ -1095,6 +1097,23 @@ class ConnectionState:
 
         guild.stickers = tuple(map(lambda d: self.store_sticker(guild, d), data['stickers']))
         self.dispatch('guild_stickers_update', guild, before_stickers, guild.stickers)
+
+    def parse_guild_audit_log_entry_create(self, data: gw.GuildAuditLogEntryCreate) -> None:
+        guild = self._get_guild(int(data['guild_id']))
+        if guild is None:
+            _log.debug('GUILD_AUDIT_LOG_ENTRY_CREATE referencing an unknown guild ID: %s. Discarding.', data['guild_id'])
+            return
+
+        entry = AuditLogEntry(
+            users=self._users,
+            integrations={},
+            app_commands={},
+            automod_rules={},
+            data=data,
+            guild=guild,
+        )
+
+        self.dispatch('audit_log_entry_create', entry)
 
     def parse_auto_moderation_rule_create(self, data: AutoModerationRule) -> None:
         guild = self._get_guild(int(data['guild_id']))
@@ -1594,7 +1613,7 @@ class ConnectionState:
         return Message(state=self, channel=channel, data=data)
 
 
-class AutoShardedConnectionState(ConnectionState):
+class AutoShardedConnectionState(ConnectionState[ClientT]):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 

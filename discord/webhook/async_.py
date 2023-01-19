@@ -38,14 +38,14 @@ import aiohttp
 from .. import utils
 from ..errors import HTTPException, Forbidden, NotFound, DiscordServerError
 from ..message import Message
-from ..enums import try_enum, WebhookType
+from ..enums import try_enum, WebhookType, ChannelType
 from ..user import BaseUser, User
 from ..flags import MessageFlags
 from ..asset import Asset
 from ..partial_emoji import PartialEmoji
 from ..http import Route, handle_message_parameters, MultipartParameters, HTTPClient, json_or_text
 from ..mixins import Hashable
-from ..channel import TextChannel, PartialMessageable
+from ..channel import TextChannel, ForumChannel, PartialMessageable
 from ..file import File
 
 __all__ = (
@@ -189,9 +189,8 @@ class AsyncWebhookAdapter:
                         if remaining == '0' and response.status != 429:
                             delta = utils._parse_ratelimit_header(response)
                             _log.debug(
-                                'Webhook ID %s has exhausted its rate limit bucket (bucket: %s, retry: %s).',
+                                'Webhook ID %s has exhausted its rate limit bucket (retry: %s).',
                                 webhook_id,
-                                bucket,
                                 delta,
                             )
                             lock.delay_by(delta)
@@ -202,10 +201,10 @@ class AsyncWebhookAdapter:
                         if response.status == 429:
                             if not response.headers.get('Via'):
                                 raise HTTPException(response, data)
-                            fmt = 'Webhook ID %s is rate limited. Retrying in %.2f seconds. Handled under the bucket %s'
+                            fmt = 'Webhook ID %s is rate limited. Retrying in %.2f seconds.'
 
                             retry_after: float = data['retry_after']  # type: ignore
-                            _log.warning(fmt, webhook_id, retry_after, bucket, stack_info=True)
+                            _log.warning(fmt, webhook_id, retry_after)
                             await asyncio.sleep(retry_after)
                             continue
 
@@ -1007,8 +1006,8 @@ class BaseWebhook(Hashable):
         return self._state and self._state._get_guild(self.guild_id)
 
     @property
-    def channel(self) -> Optional[Union[VoiceChannel, TextChannel]]:
-        """Optional[Union[:class:`VoiceChannel`, :class:`TextChannel`]]: The channel this webhook belongs to.
+    def channel(self) -> Optional[Union[ForumChannel, VoiceChannel, TextChannel]]:
+        """Optional[Union[:class:`ForumChannel`, :class:`VoiceChannel`, :class:`TextChannel`]]: The channel this webhook belongs to.
 
         If this is a partial webhook, then this will always return ``None``.
         """
@@ -1060,7 +1059,8 @@ class Webhook(BaseWebhook):
 
     There are two main ways to use Webhooks. The first is through the ones
     received by the library such as :meth:`.Guild.webhooks`,
-    :meth:`.TextChannel.webhooks` and :meth:`.VoiceChannel.webhooks`.
+    :meth:`.TextChannel.webhooks`, :meth:`.VoiceChannel.webhooks`
+    and :meth:`.ForumChannel.webhooks`.
     The ones received by the library will automatically be
     bound using the library's internal HTTP session.
 
@@ -1227,7 +1227,7 @@ class Webhook(BaseWebhook):
             A partial :class:`Webhook`.
             A partial webhook is just a webhook object with an ID and a token.
         """
-        m = re.search(r'discord(?:app)?.com/api/webhooks/(?P<id>[0-9]{17,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,68})', url)
+        m = re.search(r'discord(?:app)?\.com/api/webhooks/(?P<id>[0-9]{17,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,68})', url)
         if m is None:
             raise ValueError('Invalid webhook URL given.')
 
@@ -1492,10 +1492,18 @@ class Webhook(BaseWebhook):
         state = _WebhookState(self, parent=self._state, thread=thread)
         # state may be artificial (unlikely at this point...)
         if thread is MISSING:
-            channel = self.channel or PartialMessageable(state=self._state, guild_id=self.guild_id, id=int(data['channel_id']))  # type: ignore
+            channel_id = int(data['channel_id'])
+            channel = self.channel
+            # If this thread is created via thread_name then the channel_id would not be the same as the webhook's channel_id
+            # which would be the forum channel.
+            if self.channel_id != channel_id:
+                type = ChannelType.public_thread if isinstance(channel, ForumChannel) else (channel and channel.type)
+                channel = PartialMessageable(state=self._state, guild_id=self.guild_id, id=channel_id, type=type)  # type: ignore
+            else:
+                channel = self.channel or PartialMessageable(state=self._state, guild_id=self.guild_id, id=channel_id)  # type: ignore
         else:
             channel = self.channel
-            if isinstance(channel, TextChannel):
+            if isinstance(channel, (ForumChannel, TextChannel)):
                 channel = channel.get_thread(thread.id)
 
             if channel is None:
@@ -1695,7 +1703,7 @@ class Webhook(BaseWebhook):
                 raise ValueError('Webhook views require an associated state with the webhook')
 
             if not hasattr(view, '__discord_ui_view__'):
-                raise TypeError(f'expected view parameter to be of type View not {view.__class__!r}')
+                raise TypeError(f'expected view parameter to be of type View not {view.__class__.__name__}')
 
             if ephemeral is True and view.timeout is None:
                 view.timeout = 15 * 60.0

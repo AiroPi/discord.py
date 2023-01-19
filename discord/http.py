@@ -272,7 +272,7 @@ def _set_api_version(value: int):
     global INTERNAL_API_VERSION
 
     if not isinstance(value, int):
-        raise TypeError(f'expected int not {value.__class__!r}')
+        raise TypeError(f'expected int not {value.__class__.__name__}')
 
     if value not in (9, 10):
         raise ValueError(f'expected either 9 or 10 not {value}')
@@ -335,6 +335,7 @@ class Ratelimit:
         'reset_after',
         'expires',
         'dirty',
+        '_last_request',
         '_max_ratelimit_timeout',
         '_loop',
         '_pending_requests',
@@ -355,6 +356,7 @@ class Ratelimit:
         # The object that is sleeping is ultimately responsible for freeing the semaphore
         # for the requests currently pending.
         self._sleeping: asyncio.Lock = asyncio.Lock()
+        self._last_request: float = self._loop.time()
 
     def __repr__(self) -> str:
         return (
@@ -422,7 +424,12 @@ class Ratelimit:
     def is_expired(self) -> bool:
         return self.expires is not None and self._loop.time() > self.expires
 
+    def is_inactive(self) -> bool:
+        delta = self._loop.time() - self._last_request
+        return delta >= 300 and self.outgoing == 0 and len(self._pending_requests) == 0
+
     async def acquire(self) -> None:
+        self._last_request = self._loop.time()
         if self.is_expired():
             self.reset()
 
@@ -532,7 +539,7 @@ class HTTPClient:
         if len(self._buckets) < 256:
             return
 
-        keys = [key for key, bucket in self._buckets.items() if bucket.is_expired()]
+        keys = [key for key, bucket in self._buckets.items() if bucket.is_inactive()]
         for key in keys:
             del self._buckets[key]
 
@@ -1025,12 +1032,12 @@ class HTTPClient:
         self,
         user_id: Snowflake,
         guild_id: Snowflake,
-        delete_message_days: int = 1,
+        delete_message_seconds: int = 86400,  # one day
         reason: Optional[str] = None,
     ) -> Response[None]:
         r = Route('PUT', '/guilds/{guild_id}/bans/{user_id}', guild_id=guild_id, user_id=user_id)
         params = {
-            'delete_message_days': delete_message_days,
+            'delete_message_seconds': delete_message_seconds,
         }
 
         return self.request(r, params=params, reason=reason)
@@ -1136,7 +1143,13 @@ class HTTPClient:
             'invitable',
             'default_auto_archive_duration',
             'flags',
+            'default_thread_rate_limit_per_user',
+            'default_reaction_emoji',
+            'available_tags',
+            'applied_tags',
+            'default_forum_layout',
         )
+
         payload = {k: v for k, v in options.items() if k in valid_keys}
         return self.request(r, reason=reason, json=payload)
 
@@ -1175,6 +1188,8 @@ class HTTPClient:
             'rtc_region',
             'video_quality_mode',
             'default_auto_archive_duration',
+            'default_thread_rate_limit_per_user',
+            'available_tags',
         )
         payload.update({k: v for k, v in options.items() if k in valid_keys and v is not None})
 

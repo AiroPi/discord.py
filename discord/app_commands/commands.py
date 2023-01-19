@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     # Generally, these two libraries are supposed to be separate from each other.
     # However, for type hinting purposes it's unfortunately necessary for one to
     # reference the other to prevent type checking errors in callbacks
-    from discord.ext.commands import Cog
+    from discord.ext import commands
 
     ErrorFunc = Callable[[Interaction, AppCommandError], Coroutine[Any, Any, None]]
 
@@ -99,19 +99,19 @@ T = TypeVar('T')
 F = TypeVar('F', bound=Callable[..., Any])
 GroupT = TypeVar('GroupT', bound='Binding')
 Coro = Coroutine[Any, Any, T]
-UnboundError = Callable[['Interaction', AppCommandError], Coro[Any]]
+UnboundError = Callable[['Interaction[Any]', AppCommandError], Coro[Any]]
 Error = Union[
-    Callable[[GroupT, 'Interaction', AppCommandError], Coro[Any]],
+    Callable[[GroupT, 'Interaction[Any]', AppCommandError], Coro[Any]],
     UnboundError,
 ]
-Check = Callable[['Interaction'], Union[bool, Coro[bool]]]
-Binding = Union['Group', 'Cog']
+Check = Callable[['Interaction[Any]'], Union[bool, Coro[bool]]]
+Binding = Union['Group', 'commands.Cog']
 
 
 if TYPE_CHECKING:
     CommandCallback = Union[
-        Callable[Concatenate[GroupT, 'Interaction', P], Coro[T]],
-        Callable[Concatenate['Interaction', P], Coro[T]],
+        Callable[Concatenate[GroupT, 'Interaction[Any]', P], Coro[T]],
+        Callable[Concatenate['Interaction[Any]', P], Coro[T]],
     ]
 
     ContextMenuCallback = Union[
@@ -120,15 +120,15 @@ if TYPE_CHECKING:
         # Callable[[GroupT, 'Interaction', User], Coro[Any]],
         # Callable[[GroupT, 'Interaction', Message], Coro[Any]],
         # Callable[[GroupT, 'Interaction', Union[Member, User]], Coro[Any]],
-        Callable[['Interaction', Member], Coro[Any]],
-        Callable[['Interaction', User], Coro[Any]],
-        Callable[['Interaction', Message], Coro[Any]],
-        Callable[['Interaction', Union[Member, User]], Coro[Any]],
+        Callable[['Interaction[Any]', Member], Coro[Any]],
+        Callable[['Interaction[Any]', User], Coro[Any]],
+        Callable[['Interaction[Any]', Message], Coro[Any]],
+        Callable[['Interaction[Any]', Union[Member, User]], Coro[Any]],
     ]
 
     AutocompleteCallback = Union[
-        Callable[[GroupT, 'Interaction', ChoiceT], Coro[List[Choice[ChoiceT]]]],
-        Callable[['Interaction', ChoiceT], Coro[List[Choice[ChoiceT]]]],
+        Callable[[GroupT, 'Interaction[Any]', str], Coro[List[Choice[ChoiceT]]]],
+        Callable[['Interaction[Any]', str], Coro[List[Choice[ChoiceT]]]],
     ]
 else:
     CommandCallback = Callable[..., Coro[T]]
@@ -433,6 +433,9 @@ def _extract_parameters_from_callback(func: Callable[..., Any], globalns: Dict[s
 
 def _get_context_menu_parameter(func: ContextMenuCallback) -> Tuple[str, Any, AppCommandType]:
     params = inspect.signature(func).parameters
+    if is_inside_class(func) and not hasattr(func, '__self__'):
+        raise TypeError('context menus cannot be defined inside a class')
+
     if len(params) != 2:
         msg = (
             f'context menu callback {func.__qualname__!r} requires 2 parameters, '
@@ -456,6 +459,11 @@ def _get_context_menu_parameter(func: ContextMenuCallback) -> Tuple[str, Any, Ap
     resolved = resolve_annotation(parameter.annotation, func.__globals__, func.__globals__, {})
     type = _context_menu_annotation(resolved)
     return (parameter.name, resolved, type)
+
+
+def mark_overrideable(func: F) -> F:
+    func.__discord_app_commands_base_function__ = None
+    return func
 
 
 class Parameter:
@@ -815,13 +823,16 @@ class Command(Generic[GroupT, P, T]):
         parent = self.parent
         if parent is not None:
             # Check if the on_error is overridden
-            if parent.__class__.on_error is not Group.on_error:
+            if not hasattr(parent.on_error, '__discord_app_commands_base_function__'):
                 return True
 
             if parent.parent is not None:
-                parent_cls = parent.parent.__class__
-                if parent_cls.on_error is not Group.on_error:
+                if not hasattr(parent.parent.on_error, '__discord_app_commands_base_function__'):
                     return True
+
+        # Check if we have a bound error handler
+        if getattr(self.binding, '__discord_app_commands_error_handler__', None) is not None:
+            return True
 
         return False
 
@@ -999,7 +1010,7 @@ class Command(Generic[GroupT, P, T]):
         if self.binding is not None:
             check: Optional[Check] = getattr(self.binding, 'interaction_check', None)
             if check:
-                ret = await maybe_coroutine(check, interaction)
+                ret = await maybe_coroutine(check, interaction)  # type: ignore # Probable pyright bug
                 if not ret:
                     return False
 
@@ -1041,8 +1052,7 @@ class Command(Generic[GroupT, P, T]):
         """A decorator that registers a coroutine as an autocomplete prompt for a parameter.
 
         The coroutine callback must have 2 parameters, the :class:`~discord.Interaction`,
-        and the current value by the user (usually either a :class:`str`, :class:`int`, or :class:`float`,
-        depending on the type of the parameter being marked as autocomplete).
+        and the current value by the user (the string currently being typed by the user).
 
         To get the values from other parameters that may be filled in, accessing
         :attr:`.Interaction.namespace` will give a :class:`Namespace` object with those
@@ -1054,6 +1064,9 @@ class Command(Generic[GroupT, P, T]):
 
         The coroutine decorator **must** return a list of :class:`~discord.app_commands.Choice` objects.
         Only up to 25 objects are supported.
+
+        .. warning::
+            The choices returned from this coroutine are suggestions. The user may ignore them and input their own value.
 
         Example:
 
@@ -1147,7 +1160,7 @@ class ContextMenu:
     one of the following decorators:
 
     - :func:`~discord.app_commands.context_menu`
-    - :meth:`CommandTree.command <discord.app_commands.CommandTree.context_menu>`
+    - :meth:`CommandTree.context_menu <discord.app_commands.CommandTree.context_menu>`
 
     .. versionadded:: 2.0
 
@@ -1578,7 +1591,7 @@ class Group:
                 # This is pretty hacky
                 # It allows the module to be fetched if someone just constructs a bare Group object though.
                 self.module = inspect.currentframe().f_back.f_globals['__name__']  # type: ignore
-            except (AttributeError, IndexError):
+            except (AttributeError, IndexError, KeyError):
                 self.module = None
 
         self._children: Dict[str, Union[Command, Group]] = {}
@@ -1745,7 +1758,8 @@ class Group:
             if isinstance(command, Group):
                 yield from command.walk_commands()
 
-    async def on_error(self, interaction: Interaction, error: AppCommandError) -> None:
+    @mark_overrideable
+    async def on_error(self, interaction: Interaction, error: AppCommandError, /) -> None:
         """|coro|
 
         A callback that is called when a child's command raises an :exc:`AppCommandError`.
@@ -1790,10 +1804,10 @@ class Group:
         if len(params) != 2:
             raise TypeError('The error handler must have 2 parameters.')
 
-        self.on_error = coro  # type: ignore
+        self.on_error = coro
         return coro
 
-    async def interaction_check(self, interaction: Interaction) -> bool:
+    async def interaction_check(self, interaction: Interaction, /) -> bool:
         """|coro|
 
         A callback that is called when an interaction happens within the group
@@ -1848,7 +1862,7 @@ class Group:
         """
 
         if not isinstance(command, (Command, Group)):
-            raise TypeError(f'expected Command or Group not {command.__class__!r}')
+            raise TypeError(f'expected Command or Group not {command.__class__.__name__}')
 
         if isinstance(command, Group) and self.parent is not None:
             # In a tree like so:
@@ -1908,7 +1922,7 @@ class Group:
         auto_locale_strings: bool = True,
         extras: Dict[Any, Any] = MISSING,
     ) -> Callable[[CommandCallback[GroupT, P, T]], Command[GroupT, P, T]]:
-        """Creates an application command under this group.
+        """A decorator that creates an application command from a regular function under this group.
 
         Parameters
         ------------
@@ -2082,16 +2096,33 @@ def context_menu(
 
 
 def describe(**parameters: Union[str, locale_str]) -> Callable[[T], T]:
-    r"""Describes the given parameters by their name using the key of the keyword argument
+    r'''Describes the given parameters by their name using the key of the keyword argument
     as the name.
 
     Example:
 
     .. code-block:: python3
 
-        @app_commands.command()
+        @app_commands.command(description='Bans a member')
         @app_commands.describe(member='the member to ban')
         async def ban(interaction: discord.Interaction, member: discord.Member):
+            await interaction.response.send_message(f'Banned {member}')
+
+    Alternatively, you can describe parameters using Google, Sphinx, or Numpy style docstrings.
+
+    Example:
+
+    .. code-block:: python3
+
+        @app_commands.command()
+        async def ban(interaction: discord.Interaction, member: discord.Member):
+            """Bans a member
+
+            Parameters
+            -----------
+            member: discord.Member
+                the member to ban
+            """
             await interaction.response.send_message(f'Banned {member}')
 
     Parameters
@@ -2103,7 +2134,7 @@ def describe(**parameters: Union[str, locale_str]) -> Callable[[T], T]:
     --------
     TypeError
         The parameter name is not found.
-    """
+    '''
 
     def decorator(inner: T) -> T:
         if isinstance(inner, Command):
@@ -2242,6 +2273,9 @@ def autocomplete(**parameters: AutocompleteCallback[GroupT, ChoiceT]) -> Callabl
     callback.
 
     For more information, see the :meth:`Command.autocomplete` documentation.
+
+    .. warning::
+        The choices returned from this coroutine are suggestions. The user may ignore them and input their own value.
 
     Example:
 

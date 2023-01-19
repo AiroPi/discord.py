@@ -44,6 +44,7 @@ from typing import (
     Union,
     overload,
 )
+import re
 
 import discord
 
@@ -54,6 +55,7 @@ from .converter import Greedy, run_converters
 from .cooldowns import BucketType, Cooldown, CooldownMapping, DynamicCooldownMapping, MaxConcurrency
 from .errors import *
 from .parameters import Parameter, Signature
+from discord.app_commands.commands import NUMPY_DOCSTRING_ARG_REGEX
 
 if TYPE_CHECKING:
     from typing_extensions import Concatenate, ParamSpec, Self
@@ -160,15 +162,46 @@ def get_signature_parameters(
         if annotation is Greedy:
             raise TypeError('Unparameterized Greedy[...] is disallowed in signature.')
 
-        if hasattr(annotation, '__metadata__'):
-            # Annotated[X, Y] can access Y via __metadata__
-            metadata = annotation.__metadata__
-            if len(metadata) >= 1:
-                annotation = metadata[0]
-
         params[name] = parameter.replace(annotation=annotation)
 
     return params
+
+
+PARAMETER_HEADING_REGEX = re.compile(r'Parameters?\n---+\n', re.I)
+
+
+def _fold_text(input: str) -> str:
+    """Turns a single newline into a space, and multiple newlines into a newline."""
+
+    def replacer(m: re.Match[str]) -> str:
+        if len(m.group()) <= 1:
+            return ' '
+        return '\n'
+
+    return re.sub(r'\n+', replacer, inspect.cleandoc(input))
+
+
+def extract_descriptions_from_docstring(function: Callable[..., Any], params: Dict[str, Parameter], /) -> Optional[str]:
+    docstring = inspect.getdoc(function)
+
+    if docstring is None:
+        return None
+
+    divide = PARAMETER_HEADING_REGEX.split(docstring, 1)
+    if len(divide) == 1:
+        return docstring
+
+    description, param_docstring = divide
+    for match in NUMPY_DOCSTRING_ARG_REGEX.finditer(param_docstring):
+        name = match.group('name')
+        if name not in params:
+            continue
+
+        param = params[name]
+        if param.description is None:
+            param._description = _fold_text(match.group('description'))
+
+    return _fold_text(description.strip())
 
 
 def wrap_callback(coro: Callable[P, Coro[T]], /) -> Callable[P, Coro[Optional[T]]]:
@@ -371,9 +404,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         if help_doc is not None:
             help_doc = inspect.cleandoc(help_doc)
         else:
-            help_doc = inspect.getdoc(func)
-            if isinstance(help_doc, bytes):
-                help_doc = help_doc.decode('utf-8')
+            help_doc = extract_descriptions_from_docstring(func, self.params)
 
         self.help: Optional[str] = help_doc
 
@@ -420,11 +451,11 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         self.require_var_positional: bool = kwargs.get('require_var_positional', False)
         self.ignore_extra: bool = kwargs.get('ignore_extra', True)
         self.cooldown_after_parsing: bool = kwargs.get('cooldown_after_parsing', False)
-        self._cog: CogT = None
+        self._cog: CogT = None  # type: ignore # This breaks every other pyright release
 
         # bandaid for the fact that sometimes parent can be the bot instance
         parent: Optional[GroupMixin[Any]] = kwargs.get('parent')
-        self.parent: Optional[GroupMixin[Any]] = parent if isinstance(parent, _BaseCommand) else None
+        self.parent: Optional[GroupMixin[Any]] = parent if isinstance(parent, _BaseCommand) else None  # type: ignore # Does not recognise mixin usage
 
         self._before_invoke: Optional[Hook] = None
         try:
@@ -626,14 +657,14 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
                 return list(attachments)
 
             if param.kind in (param.POSITIONAL_OR_KEYWORD, param.POSITIONAL_ONLY):
-                return await self._transform_greedy_pos(ctx, param, param.required, converter.converter)
+                return await self._transform_greedy_pos(ctx, param, param.required, converter.constructed_converter)
             elif param.kind == param.VAR_POSITIONAL:
-                return await self._transform_greedy_var_pos(ctx, param, converter.converter)
+                return await self._transform_greedy_var_pos(ctx, param, converter.constructed_converter)
             else:
                 # if we're here, then it's a KEYWORD_ONLY param type
                 # since this is mostly useless, we'll helpfully transform Greedy[X]
                 # into just X and do the parsing that way.
-                converter = converter.converter
+                converter = converter.constructed_converter
 
         # Try to detect Optional[discord.Attachment] or discord.Attachment special converter
         if converter is discord.Attachment:
@@ -2018,7 +2049,7 @@ def has_role(item: Union[int, str], /) -> Check[Any]:
 def has_any_role(*items: Union[int, str]) -> Callable[[T], T]:
     r"""A :func:`.check` that is added that checks if the member invoking the
     command has **any** of the roles specified. This means that if they have
-    one out of the three roles specified, then this check will return `True`.
+    one out of the three roles specified, then this check will return ``True``.
 
     Similar to :func:`.has_role`\, the names or IDs passed in must be exact.
 
@@ -2422,6 +2453,10 @@ def cooldown(
 
         .. versionchanged:: 1.7
             Callables are now supported for custom bucket types.
+
+        .. versionchanged:: 2.0
+            When passing a callable, it now needs to accept :class:`.Context`
+            rather than :class:`~discord.Message` as its only argument.
     """
 
     def decorator(func: Union[Command, CoroFunc]) -> Union[Command, CoroFunc]:
@@ -2441,7 +2476,7 @@ def dynamic_cooldown(
     """A decorator that adds a dynamic cooldown to a :class:`.Command`
 
     This differs from :func:`.cooldown` in that it takes a function that
-    accepts a single parameter of type :class:`.discord.Message` and must
+    accepts a single parameter of type :class:`.Context` and must
     return a :class:`~discord.app_commands.Cooldown` or ``None``.
     If ``None`` is returned then that cooldown is effectively bypassed.
 

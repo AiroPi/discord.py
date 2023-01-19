@@ -40,7 +40,6 @@ from typing import (
     Sequence,
     Set,
     Tuple,
-    TypeVar,
     Union,
     overload,
 )
@@ -63,11 +62,12 @@ from .translator import Translator, locale_str
 from ..errors import ClientException, HTTPException
 from ..enums import AppCommandType, InteractionType
 from ..utils import MISSING, _get_as_snowflake, _is_submodule
+from .._types import ClientT
+
 
 if TYPE_CHECKING:
     from ..types.interactions import ApplicationCommandInteractionData, ApplicationCommandInteractionDataOption
     from ..interactions import Interaction
-    from ..client import Client
     from ..abc import Snowflake
     from .commands import ContextMenuCallback, CommandCallback, P, T
 
@@ -77,8 +77,6 @@ if TYPE_CHECKING:
     ]
 
 __all__ = ('CommandTree',)
-
-ClientT = TypeVar('ClientT', bound='Client')
 
 _log = logging.getLogger(__name__)
 
@@ -346,7 +344,7 @@ class CommandTree(Generic[ClientT]):
                 self._context_menus.update(current)
             return
         elif not isinstance(command, (Command, Group)):
-            raise TypeError(f'Expected an application command, received {command.__class__!r} instead')
+            raise TypeError(f'Expected an application command, received {command.__class__.__name__} instead')
 
         # todo: validate application command groups having children (required)
 
@@ -773,7 +771,7 @@ class CommandTree(Generic[ClientT]):
             for key in remove:
                 del mapping[key]
 
-    async def on_error(self, interaction: Interaction, error: AppCommandError) -> None:
+    async def on_error(self, interaction: Interaction[ClientT], error: AppCommandError, /) -> None:
         """|coro|
 
         A callback that is called when any command raises an :exc:`AppCommandError`.
@@ -827,8 +825,7 @@ class CommandTree(Generic[ClientT]):
         if len(params) != 2:
             raise TypeError('error handler must have 2 parameters')
 
-        # Type checker doesn't like overriding methods like this
-        self.on_error = coro  # type: ignore
+        self.on_error = coro
         return coro
 
     def command(
@@ -842,7 +839,7 @@ class CommandTree(Generic[ClientT]):
         auto_locale_strings: bool = True,
         extras: Dict[Any, Any] = MISSING,
     ) -> Callable[[CommandCallback[Group, P, T]], Command[Group, P, T]]:
-        """Creates an application command directly under this tree.
+        """A decorator that creates an application command from a regular function directly under this tree.
 
         Parameters
         ------------
@@ -911,7 +908,7 @@ class CommandTree(Generic[ClientT]):
         auto_locale_strings: bool = True,
         extras: Dict[Any, Any] = MISSING,
     ) -> Callable[[ContextMenuCallback], ContextMenu]:
-        """Creates an application command context menu from a regular function directly under this tree.
+        """A decorator that creates an application command context menu from a regular function directly under this tree.
 
         This function must have a signature of :class:`~discord.Interaction` as its first parameter
         and taking either a :class:`~discord.Member`, :class:`~discord.User`, or :class:`~discord.Message`,
@@ -984,7 +981,9 @@ class CommandTree(Generic[ClientT]):
         return self._state._translator
 
     async def set_translator(self, translator: Optional[Translator]) -> None:
-        """Sets the translator to use for translating commands.
+        """|coro|
+
+        Sets the translator to use for translating commands.
 
         If a translator was previously set, it will be unloaded using its
         :meth:`Translator.unload` method.
@@ -1003,7 +1002,7 @@ class CommandTree(Generic[ClientT]):
         """
 
         if translator is not None and not isinstance(translator, Translator):
-            raise TypeError(f'expected None or Translator instance, received {translator.__class__!r} instead')
+            raise TypeError(f'expected None or Translator instance, received {translator.__class__.__name__} instead')
 
         old_translator = self._state._translator
         if old_translator is not None:
@@ -1069,20 +1068,22 @@ class CommandTree(Generic[ClientT]):
             else:
                 data = await self._http.bulk_upsert_guild_commands(self.client.application_id, guild.id, payload=payload)
         except HTTPException as e:
-            if e.status == 400:
+            if e.status == 400 and e.code == 50035:
                 raise CommandSyncFailure(e, commands) from None
             raise
 
         return [AppCommand(data=d, state=self._state) for d in data]
 
-    async def _dispatch_error(self, interaction: Interaction, error: AppCommandError, /) -> None:
+    async def _dispatch_error(self, interaction: Interaction[ClientT], error: AppCommandError, /) -> None:
         command = interaction.command
-        if isinstance(command, Command):
-            await command._invoke_error_handlers(interaction, error)
-        else:
+        interaction.command_failed = True
+        try:
+            if isinstance(command, Command):
+                await command._invoke_error_handlers(interaction, error)
+        finally:
             await self.on_error(interaction, error)
 
-    def _from_interaction(self, interaction: Interaction) -> None:
+    def _from_interaction(self, interaction: Interaction[ClientT]) -> None:
         async def wrapper():
             try:
                 await self._call(interaction)
@@ -1153,7 +1154,9 @@ class CommandTree(Generic[ClientT]):
 
         return (command, options)
 
-    async def _call_context_menu(self, interaction: Interaction, data: ApplicationCommandInteractionData, type: int) -> None:
+    async def _call_context_menu(
+        self, interaction: Interaction[ClientT], data: ApplicationCommandInteractionData, type: int
+    ) -> None:
         name = data['name']
         guild_id = _get_as_snowflake(data, 'guild_id')
         ctx_menu = self._context_menus.get((name, guild_id, type))
@@ -1192,7 +1195,7 @@ class CommandTree(Generic[ClientT]):
         else:
             self.client.dispatch('app_command_completion', interaction, ctx_menu)
 
-    async def interaction_check(self, interaction: Interaction, /) -> bool:
+    async def interaction_check(self, interaction: Interaction[ClientT], /) -> bool:
         """|coro|
 
         A global check to determine if an :class:`~discord.Interaction` should
@@ -1203,8 +1206,9 @@ class CommandTree(Generic[ClientT]):
         """
         return True
 
-    async def _call(self, interaction: Interaction) -> None:
+    async def _call(self, interaction: Interaction[ClientT]) -> None:
         if not await self.interaction_check(interaction):
+            interaction.command_failed = True
             return
 
         data: ApplicationCommandInteractionData = interaction.data  # type: ignore
@@ -1237,7 +1241,9 @@ class CommandTree(Generic[ClientT]):
         try:
             await command._invoke_with_namespace(interaction, namespace)
         except AppCommandError as e:
+            interaction.command_failed = True
             await command._invoke_error_handlers(interaction, e)
             await self.on_error(interaction, e)
         else:
-            self.client.dispatch('app_command_completion', interaction, command)
+            if not interaction.command_failed:
+                self.client.dispatch('app_command_completion', interaction, command)

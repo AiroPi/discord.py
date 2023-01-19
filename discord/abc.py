@@ -191,7 +191,6 @@ class Snowflake(Protocol):
         The model's unique ID.
     """
 
-    __slots__ = ()
     id: int
 
 
@@ -218,8 +217,6 @@ class User(Snowflake, Protocol):
     system: :class:`bool`
         If the user is a system account.
     """
-
-    __slots__ = ()
 
     name: str
     discriminator: str
@@ -418,6 +415,11 @@ class GuildChannel:
 
         try:
             options['rate_limit_per_user'] = options.pop('slowmode_delay')
+        except KeyError:
+            pass
+
+        try:
+            options['default_thread_rate_limit_per_user'] = options.pop('default_thread_slowmode_delay')
         except KeyError:
             pass
 
@@ -637,6 +639,20 @@ class GuildChannel:
         category = self.guild.get_channel(self.category_id)
         return bool(category and category.overwrites == self.overwrites)
 
+    def _apply_implicit_permissions(self, base: Permissions) -> None:
+        # if you can't send a message in a channel then you can't have certain
+        # permissions as well
+        if not base.send_messages:
+            base.send_tts_messages = False
+            base.mention_everyone = False
+            base.embed_links = False
+            base.attach_files = False
+
+        # if you can't read a channel then you have no permissions there
+        if not base.read_messages:
+            denied = Permissions.all_channel()
+            base.value &= ~denied.value
+
     def permissions_for(self, obj: Union[Member, Role], /) -> Permissions:
         """Handles permission resolution for the :class:`~discord.Member`
         or :class:`~discord.Role`.
@@ -647,6 +663,7 @@ class GuildChannel:
         - Guild roles
         - Channel overrides
         - Member overrides
+        - Implicit permissions
         - Member timeout
 
         If a :class:`~discord.Role` is passed, then it checks the permissions
@@ -762,19 +779,6 @@ class GuildChannel:
                 base.handle_overwrite(allow=overwrite.allow, deny=overwrite.deny)
                 break
 
-        # if you can't send a message in a channel then you can't have certain
-        # permissions as well
-        if not base.send_messages:
-            base.send_tts_messages = False
-            base.mention_everyone = False
-            base.embed_links = False
-            base.attach_files = False
-
-        # if you can't read a channel then you have no permissions there
-        if not base.read_messages:
-            denied = Permissions.all_channel()
-            base.value &= ~denied.value
-
         if obj.is_timed_out():
             # Timeout leads to every permission except VIEW_CHANNEL and READ_MESSAGE_HISTORY
             # being explicitly denied
@@ -788,7 +792,7 @@ class GuildChannel:
 
         Deletes the channel.
 
-        You must have :attr:`~discord.Permissions.manage_channels` permission to use this.
+        You must have :attr:`~discord.Permissions.manage_channels` to do this.
 
         Parameters
         -----------
@@ -852,7 +856,7 @@ class GuildChannel:
         If the ``overwrite`` parameter is ``None``, then the permission
         overwrites are deleted.
 
-        You must have the :attr:`~discord.Permissions.manage_roles` permission to use this.
+        You must have :attr:`~discord.Permissions.manage_roles` to do this.
 
         .. note::
 
@@ -968,8 +972,7 @@ class GuildChannel:
         Clones this channel. This creates a channel with the same properties
         as this channel.
 
-        You must have the :attr:`~discord.Permissions.manage_channels` permission to
-        do this.
+        You must have :attr:`~discord.Permissions.manage_channels` to do this.
 
         .. versionadded:: 1.1
 
@@ -1050,8 +1053,7 @@ class GuildChannel:
 
         If exact position movement is required, ``edit`` should be used instead.
 
-        You must have the :attr:`~discord.Permissions.manage_channels` permission to
-        do this.
+        You must have :attr:`~discord.Permissions.manage_channels` to do this.
 
         .. note::
 
@@ -1188,8 +1190,7 @@ class GuildChannel:
 
         Creates an instant invite from a text or voice channel.
 
-        You must have the :attr:`~discord.Permissions.create_instant_invite` permission to
-        do this.
+        You must have :attr:`~discord.Permissions.create_instant_invite` to do this.
 
         Parameters
         ------------
@@ -1214,12 +1215,12 @@ class GuildChannel:
             .. versionadded:: 2.0
 
         target_user: Optional[:class:`User`]
-            The user whose stream to display for this invite, required if `target_type` is `TargetType.stream`. The user must be streaming in the channel.
+            The user whose stream to display for this invite, required if ``target_type`` is :attr:`.InviteTarget.stream`. The user must be streaming in the channel.
 
             .. versionadded:: 2.0
 
         target_application_id:: Optional[:class:`int`]
-            The id of the embedded application for the invite, required if `target_type` is `TargetType.embedded_application`.
+            The id of the embedded application for the invite, required if ``target_type`` is :attr:`.InviteTarget.embedded_application`.
 
             .. versionadded:: 2.0
 
@@ -1511,7 +1512,7 @@ class Messageable:
             reference_dict = MISSING
 
         if view and not hasattr(view, '__discord_ui_view__'):
-            raise TypeError(f'view parameter must be View not {view.__class__!r}')
+            raise TypeError(f'view parameter must be View not {view.__class__.__name__}')
 
         if suppress_embeds:
             from .message import MessageFlags  # circular import
@@ -1642,7 +1643,7 @@ class Messageable:
     ) -> AsyncIterator[Message]:
         """Returns an :term:`asynchronous iterator` that enables receiving the destination's message history.
 
-        You must have :attr:`~discord.Permissions.read_message_history` permissions to use this.
+        You must have :attr:`~discord.Permissions.read_message_history` to do this.
 
         Examples
         ---------
@@ -1775,23 +1776,25 @@ class Messageable:
         channel = await self._get_channel()
 
         while True:
-            retrieve = min(100 if limit is None else limit, 100)
+            retrieve = 100 if limit is None else min(limit, 100)
             if retrieve < 1:
                 return
 
             data, state, limit = await strategy(retrieve, state, limit)
-
-            # Terminate loop on next iteration; there's no data left after this
-            if len(data) < 100:
-                limit = 0
 
             if reverse:
                 data = reversed(data)
             if predicate:
                 data = filter(predicate, data)
 
-            for raw_message in data:
+            count = 0
+
+            for count, raw_message in enumerate(data, 1):
                 yield self._state.create_message(channel=channel, data=raw_message)
+
+            if count < 100:
+                # There's no data left after this
+                break
 
 
 class Connectable(Protocol):

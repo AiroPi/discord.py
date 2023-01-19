@@ -39,6 +39,7 @@ from typing import (
     List,
     Optional,
     TYPE_CHECKING,
+    Sequence,
     Tuple,
     TypeVar,
     Union,
@@ -145,6 +146,12 @@ class CogMeta(type):
         than :class:`str`. Defaults to ``True``.
 
         .. versionadded:: 2.0
+    group_extras: :class:`dict`
+        A dictionary that can be used to store extraneous data.
+        This is only applicable for :class:`GroupCog` instances.
+        The library will not touch any values or keys within this dictionary.
+
+        .. versionadded:: 2.1
     """
 
     __cog_name__: str
@@ -153,6 +160,7 @@ class CogMeta(type):
     __cog_group_description__: Union[str, app_commands.locale_str]
     __cog_group_nsfw__: bool
     __cog_group_auto_locale_strings__: bool
+    __cog_group_extras__: Dict[Any, Any]
     __cog_settings__: Dict[str, Any]
     __cog_commands__: List[Command[Any, ..., Any]]
     __cog_app_commands__: List[Union[app_commands.Group, app_commands.Command[Any, ..., Any]]]
@@ -183,6 +191,7 @@ class CogMeta(type):
         attrs['__cog_group_name__'] = group_name
         attrs['__cog_group_nsfw__'] = kwargs.pop('group_nsfw', False)
         attrs['__cog_group_auto_locale_strings__'] = kwargs.pop('group_auto_locale_strings', True)
+        attrs['__cog_group_extras__'] = kwargs.pop('group_extras', {})
 
         description = kwargs.pop('description', None)
         if description is None:
@@ -306,6 +315,7 @@ class Cog(metaclass=CogMeta):
                 guild_ids=getattr(cls, '__discord_app_commands_default_guilds__', None),
                 guild_only=getattr(cls, '__discord_app_commands_guild_only__', False),
                 default_permissions=getattr(cls, '__discord_app_commands_default_permissions__', None),
+                extras=cls.__cog_group_extras__,
             )
         else:
             group = None
@@ -328,14 +338,14 @@ class Cog(metaclass=CogMeta):
                 app_command: Optional[Union[app_commands.Group, app_commands.Command[Self, ..., Any]]] = getattr(
                     command, 'app_command', None
                 )
-                if app_command:
+                if app_command is not None:
                     group_parent = self.__cog_app_commands_group__
                     app_command = app_command._copy_with(parent=group_parent, binding=self)
                     # The type checker does not see the app_command attribute even though it exists
                     command.app_command = app_command  # type: ignore
 
                     if self.__cog_app_commands_group__:
-                        children.append(app_command)
+                        children.append(app_command)  # type: ignore # Somehow it thinks it can be None here
 
         if Cog._get_overridden_method(self.cog_app_command_error) is not None:
             error_handler = self.cog_app_command_error
@@ -481,7 +491,7 @@ class Cog(metaclass=CogMeta):
         """
 
         if name is not MISSING and not isinstance(name, str):
-            raise TypeError(f'Cog.listener expected str but received {name.__class__.__name__!r} instead.')
+            raise TypeError(f'Cog.listener expected str but received {name.__class__.__name__} instead.')
 
         def decorator(func: FuncT) -> FuncT:
             actual = func
@@ -509,6 +519,13 @@ class Cog(metaclass=CogMeta):
         .. versionadded:: 1.7
         """
         return not hasattr(self.cog_command_error.__func__, '__cog_special_method__')
+
+    def has_app_command_error_handler(self) -> bool:
+        """:class:`bool`: Checks whether the cog has an app error handler.
+
+        .. versionadded:: 2.1
+        """
+        return not hasattr(self.cog_app_command_error.__func__, '__cog_special_method__')
 
     @_cog_special_method
     async def cog_load(self) -> None:
@@ -570,7 +587,9 @@ class Cog(metaclass=CogMeta):
 
     @_cog_special_method
     async def cog_command_error(self, ctx: Context[BotT], error: Exception) -> None:
-        """A special method that is called whenever an error
+        """|coro|
+
+        A special method that is called whenever an error
         is dispatched inside this cog.
 
         This is similar to :func:`.on_command_error` except only applying
@@ -589,7 +608,9 @@ class Cog(metaclass=CogMeta):
 
     @_cog_special_method
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        """A special method that is called whenever an error within
+        """|coro|
+
+        A special method that is called whenever an error within
         an application command is dispatched inside this cog.
 
         This is similar to :func:`discord.app_commands.CommandTree.on_error` except
@@ -608,7 +629,9 @@ class Cog(metaclass=CogMeta):
 
     @_cog_special_method
     async def cog_before_invoke(self, ctx: Context[BotT]) -> None:
-        """A special method that acts as a cog local pre-invoke hook.
+        """|coro|
+
+        A special method that acts as a cog local pre-invoke hook.
 
         This is similar to :meth:`.Command.before_invoke`.
 
@@ -623,7 +646,9 @@ class Cog(metaclass=CogMeta):
 
     @_cog_special_method
     async def cog_after_invoke(self, ctx: Context[BotT]) -> None:
-        """A special method that acts as a cog local post-invoke hook.
+        """|coro|
+
+        A special method that acts as a cog local post-invoke hook.
 
         This is similar to :meth:`.Command.after_invoke`.
 
@@ -636,7 +661,7 @@ class Cog(metaclass=CogMeta):
         """
         pass
 
-    async def _inject(self, bot: BotBase, override: bool, guild: Optional[Snowflake], guilds: List[Snowflake]) -> Self:
+    async def _inject(self, bot: BotBase, override: bool, guild: Optional[Snowflake], guilds: Sequence[Snowflake]) -> Self:
         cls = self.__class__
 
         # we'll call this first so that errors can propagate without
@@ -726,6 +751,9 @@ class GroupCog(Cog):
     Decorators such as :func:`~discord.app_commands.guild_only`, :func:`~discord.app_commands.guilds`,
     and :func:`~discord.app_commands.default_permissions` will apply to the group if used on top of the
     cog.
+
+    Hybrid commands will also be added to the Group, giving the ability categorize slash commands into
+    groups, while keeping the prefix-style commmand as a root-level command.
 
     For example:
 

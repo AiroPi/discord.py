@@ -23,31 +23,39 @@ DEALINGS IN THE SOFTWARE.
 """
 
 from __future__ import annotations
+from typing import Optional
+from typing_extensions import Annotated
 
-from typing import TypedDict, Optional
-from typing_extensions import NotRequired
+import discord
+from discord import app_commands
+from discord.ext import commands
 
-from .snowflake import Snowflake
+import pytest
 
-
-class Role(TypedDict):
-    id: Snowflake
-    name: str
-    color: int
-    hoist: bool
-    position: int
-    permissions: str
-    managed: bool
-    mentionable: bool
-    icon: NotRequired[Optional[str]]
-    unicode_emoji: NotRequired[Optional[str]]
-    tags: NotRequired[RoleTags]
+def test_annotated_annotation():
+    # can't exactly test if the parameter is the same, so just test if it raises something
+    @app_commands.command()
+    async def foo(interaction: discord.Interaction, param: Annotated[float, Optional[int]]):
+        pass
 
 
-class RoleTags(TypedDict, total=False):
-    bot_id: Snowflake
-    integration_id: Snowflake
-    subscription_listing_id: Snowflake
-    premium_subscriber: None
-    available_for_purchase: None
-    guild_connections: None
+    def to_hex(arg: str) -> int:
+        return int(arg, 16)
+
+    class Flag(commands.FlagConverter):
+        thing: Annotated[int, to_hex]
+
+    assert Flag.get_flags()['thing'].annotation == to_hex
+
+    @commands.command()
+    async def bar(ctx: commands.Context, param: Annotated[float, Optional[int]]):
+        pass
+
+    assert bar.clean_params['param'].annotation == Optional[int]
+
+    @commands.command()
+    async def nested(ctx: commands.Context, param: Optional[Annotated[str, int]]):
+        pass
+
+    assert nested.clean_params['param'].annotation == Optional[int]
+

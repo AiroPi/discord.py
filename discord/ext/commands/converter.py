@@ -43,6 +43,7 @@ from typing import (
     Union,
     runtime_checkable,
 )
+import types
 
 import discord
 
@@ -154,7 +155,7 @@ class IDConverter(Converter[T_co]):
 class ObjectConverter(IDConverter[discord.Object]):
     """Converts to a :class:`~discord.Object`.
 
-    The argument must follow the valid ID or mention formats (e.g. `<@80088516616269824>`).
+    The argument must follow the valid ID or mention formats (e.g. ``<@80088516616269824>``).
 
     .. versionadded:: 2.0
 
@@ -566,7 +567,7 @@ class CategoryChannelConverter(IDConverter[discord.CategoryChannel]):
 
 
 class ThreadConverter(IDConverter[discord.Thread]):
-    """Coverts to a :class:`~discord.Thread`.
+    """Converts to a :class:`~discord.Thread`.
 
     All lookups are via the local guild.
 
@@ -675,7 +676,7 @@ class RoleConverter(IDConverter[discord.Role]):
 
 
 class GameConverter(Converter[discord.Game]):
-    """Converts to :class:`~discord.Game`."""
+    """Converts to a :class:`~discord.Game`."""
 
     async def convert(self, ctx: Context[BotT], argument: str) -> discord.Game:
         return discord.Game(name=argument)
@@ -1021,8 +1022,11 @@ class Greedy(List[T]):
             raise TypeError('Greedy[...] only takes a single argument')
         converter = params[0]
 
-        origin = getattr(converter, '__origin__', None)
         args = getattr(converter, '__args__', ())
+        if discord.utils.PY_310 and converter.__class__ is types.UnionType:  # type: ignore
+            converter = Union[args]  # type: ignore
+
+        origin = getattr(converter, '__origin__', None)
 
         if not (callable(converter) or isinstance(converter, Converter) or origin is not None):
             raise TypeError('Greedy[...] expects a type or a Converter instance.')
@@ -1034,6 +1038,17 @@ class Greedy(List[T]):
             raise TypeError(f'Greedy[{converter!r}] is invalid.')
 
         return cls(converter=converter)
+
+    @property
+    def constructed_converter(self) -> Any:
+        # Only construct a converter once in order to maintain state between convert calls
+        if (
+            inspect.isclass(self.converter)
+            and issubclass(self.converter, Converter)
+            and not inspect.ismethod(self.converter.convert)
+        ):
+            return self.converter()
+        return self.converter
 
 
 if TYPE_CHECKING:
@@ -1105,9 +1120,15 @@ else:
             # Trick to allow it inside typing.Union
             pass
 
+        def __or__(self, rhs) -> Any:
+            return Union[self, rhs]
+
+        def __repr__(self) -> str:
+            return f'{self.__class__.__name__}[{self.annotation.__name__}, {self.min}, {self.max}]'
+
         def __class_getitem__(cls, obj) -> Range:
             if not isinstance(obj, tuple):
-                raise TypeError(f'expected tuple for arguments, received {obj.__class__!r} instead')
+                raise TypeError(f'expected tuple for arguments, received {obj.__class__.__name__} instead')
 
             if len(obj) == 2:
                 obj = (*obj, None)

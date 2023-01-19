@@ -424,10 +424,12 @@ class Choice(Generic[ChoiceT]):
     -----------
     name: Union[:class:`str`, :class:`locale_str`]
         The name of the choice. Used for display purposes.
+        Can only be up to 100 characters.
     name_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
         The localised names of the choice. Used for display purposes.
     value: Union[:class:`int`, :class:`str`, :class:`float`]
-        The value of the choice.
+        The value of the choice. If it's a string, it can only be
+        up to 100 characters long.
     """
 
     __slots__ = ('name', 'value', '_locale_name', 'name_localizations')
@@ -443,7 +445,7 @@ class Choice(Generic[ChoiceT]):
     def from_dict(cls, data: ApplicationCommandOptionChoice) -> Choice[ChoiceT]:
         self = cls.__new__(cls)
         self.name = data['name']
-        self.value = data['value']
+        self.value = data['value']  # type: ignore # This seems to break every other pyright release
         self.name_localizations = _to_locale_dict(data.get('name_localizations') or {})
         return self
 
@@ -466,7 +468,7 @@ class Choice(Generic[ChoiceT]):
             return AppCommandOptionType.string
         else:
             raise TypeError(
-                f'invalid Choice value type given, expected int, str, or float but received {self.value.__class__!r}'
+                f'invalid Choice value type given, expected int, str, or float but received {self.value.__class__.__name__}'
             )
 
     async def get_translated_payload(self, translator: Translator) -> Dict[str, Any]:

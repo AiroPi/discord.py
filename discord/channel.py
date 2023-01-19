@@ -47,7 +47,7 @@ import datetime
 import discord.abc
 from .scheduled_event import ScheduledEvent
 from .permissions import PermissionOverwrite, Permissions
-from .enums import ChannelType, PrivacyLevel, try_enum, VideoQualityMode, EntityType
+from .enums import ChannelType, ForumLayoutType, PrivacyLevel, try_enum, VideoQualityMode, EntityType
 from .mixins import Hashable
 from . import utils
 from .utils import MISSING
@@ -55,6 +55,8 @@ from .asset import Asset
 from .errors import ClientException
 from .stage_instance import StageInstance
 from .threads import Thread
+from .partial_emoji import _EmojiTag, PartialEmoji
+from .flags import ChannelFlags
 from .http import handle_message_parameters
 
 __all__ = (
@@ -63,6 +65,7 @@ __all__ = (
     'StageChannel',
     'DMChannel',
     'CategoryChannel',
+    'ForumTag',
     'ForumChannel',
     'GroupChannel',
     'PartialMessageable',
@@ -77,7 +80,7 @@ if TYPE_CHECKING:
     from .member import Member, VoiceState
     from .abc import Snowflake, SnowflakeTime
     from .embeds import Embed
-    from .message import Message, PartialMessage
+    from .message import Message, PartialMessage, EmojiInputType
     from .mentions import AllowedMentions
     from .webhook import Webhook
     from .state import ConnectionState
@@ -95,6 +98,7 @@ if TYPE_CHECKING:
         CategoryChannel as CategoryChannelPayload,
         GroupDMChannel as GroupChannelPayload,
         ForumChannel as ForumChannelPayload,
+        ForumTag as ForumTagPayload,
     )
     from .types.snowflake import SnowflakeList
 
@@ -147,7 +151,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         *not* point to an existing or valid message.
     slowmode_delay: :class:`int`
         The number of seconds a member must wait between sending messages
-        in this channel. A value of `0` denotes that it is disabled.
+        in this channel. A value of ``0`` denotes that it is disabled.
         Bots and users with :attr:`~Permissions.manage_channels` or
         :attr:`~Permissions.manage_messages` bypass slowmode.
     nsfw: :class:`bool`
@@ -227,6 +231,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
     @utils.copy_doc(discord.abc.GuildChannel.permissions_for)
     def permissions_for(self, obj: Union[Member, Role], /) -> Permissions:
         base = super().permissions_for(obj)
+        self._apply_implicit_permissions(base)
 
         # text channels do not have voice related permissions
         denied = Permissions.voice()
@@ -306,8 +311,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
 
         Edits the channel.
 
-        You must have the :attr:`~Permissions.manage_channels` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_channels` to do this.
 
         .. versionchanged:: 1.3
             The ``overwrites`` keyword-only parameter was added.
@@ -340,7 +344,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
             category.
         slowmode_delay: :class:`int`
             Specifies the slowmode rate limit for user in this channel, in seconds.
-            A value of `0` disables slowmode. The maximum value possible is `21600`.
+            A value of ``0`` disables slowmode. The maximum value possible is ``21600``.
         type: :class:`ChannelType`
             Change the type of this text channel. Currently, only conversion between
             :attr:`ChannelType.text` and :attr:`ChannelType.news` is supported. This
@@ -353,6 +357,8 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         default_auto_archive_duration: :class:`int`
             The new default auto archive duration in minutes for threads created in this channel.
             Must be one of ``60``, ``1440``, ``4320``, or ``10080``.
+
+            .. versionadded:: 2.0
 
         Raises
         ------
@@ -396,8 +402,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         You cannot bulk delete more than 100 messages or messages that
         are older than 14 days old.
 
-        You must have the :attr:`~Permissions.manage_messages` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_messages` to do this.
 
         .. versionchanged:: 2.0
 
@@ -458,9 +463,9 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         ``check``. If a ``check`` is not provided then all messages are deleted
         without discrimination.
 
-        You must have the :attr:`~Permissions.manage_messages` permission to
+        You must have :attr:`~Permissions.manage_messages` to
         delete messages even if they are your own.
-        The :attr:`~Permissions.read_message_history` permission is
+        Having :attr:`~Permissions.read_message_history` is
         also needed to retrieve message history.
 
         .. versionchanged:: 2.0
@@ -530,7 +535,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
 
         Gets the list of webhooks from this channel.
 
-        Requires :attr:`~.Permissions.manage_webhooks` permissions.
+        You must have :attr:`~.Permissions.manage_webhooks` to do this.
 
         Raises
         -------
@@ -553,7 +558,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
 
         Creates a webhook for this channel.
 
-        Requires :attr:`~.Permissions.manage_webhooks` permissions.
+        You must have :attr:`~.Permissions.manage_webhooks` to do this.
 
         .. versionchanged:: 1.1
             Added the ``reason`` keyword-only parameter.
@@ -590,7 +595,8 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         return Webhook.from_state(data, state=self._state)
 
     async def follow(self, *, destination: TextChannel, reason: Optional[str] = None) -> Webhook:
-        """
+        """|coro|
+
         Follows a channel using a webhook.
 
         Only news channels can be followed.
@@ -673,6 +679,11 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
     def get_thread(self, thread_id: int, /) -> Optional[Thread]:
         """Returns a thread with the given ID.
 
+        .. note::
+
+            This does not always retrieve archived threads, as they are not retained in the internal
+            cache. Use :func:`Guild.fetch_channel` instead.
+
         .. versionadded:: 2.0
 
         Parameters
@@ -729,7 +740,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
             Defaults to ``True``.
         slowmode_delay: Optional[:class:`int`]
             Specifies the slowmode rate limit for user in this channel, in seconds.
-            The maximum value possible is `21600`. By default no slowmode rate limit
+            The maximum value possible is ``21600``. By default no slowmode rate limit
             if this is ``None``.
 
         Raises
@@ -781,7 +792,7 @@ class TextChannel(discord.abc.Messageable, discord.abc.GuildChannel, Hashable):
         """Returns an :term:`asynchronous iterator` that iterates over all archived threads in this text channel,
         in order of decreasing ID for joined threads, and decreasing :attr:`Thread.archive_timestamp` otherwise.
 
-        You must have :attr:`~Permissions.read_message_history` to use this. If iterating over private threads
+        You must have :attr:`~Permissions.read_message_history` to do this. If iterating over private threads
         then :attr:`~Permissions.manage_threads` is also required.
 
         .. versionadded:: 2.0
@@ -875,6 +886,7 @@ class VocalGuildChannel(discord.abc.Connectable, discord.abc.GuildChannel, Hasha
         'user_limit',
         '_state',
         'position',
+        'slowmode_delay',
         '_overwrites',
         'category_id',
         'rtc_region',
@@ -902,6 +914,7 @@ class VocalGuildChannel(discord.abc.Connectable, discord.abc.GuildChannel, Hasha
         self.category_id: Optional[int] = utils._get_as_snowflake(data, 'parent_id')
         self.last_message_id: Optional[int] = utils._get_as_snowflake(data, 'last_message_id')
         self.position: int = data['position']
+        self.slowmode_delay = data.get('rate_limit_per_user', 0)
         self.bitrate: int = data['bitrate']
         self.user_limit: int = data['user_limit']
         self._fill_overwrites(data)
@@ -963,6 +976,7 @@ class VocalGuildChannel(discord.abc.Connectable, discord.abc.GuildChannel, Hasha
     @utils.copy_doc(discord.abc.GuildChannel.permissions_for)
     def permissions_for(self, obj: Union[Member, Role], /) -> Permissions:
         base = super().permissions_for(obj)
+        self._apply_implicit_permissions(base)
 
         # voice channels cannot be edited by people who can't connect to them
         # It also implicitly denies all other voice perms
@@ -1032,6 +1046,13 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
         *not* point to an existing or valid message.
 
         .. versionadded:: 2.0
+    slowmode_delay: :class:`int`
+        The number of seconds a member must wait between sending messages
+        in this channel. A value of ``0`` denotes that it is disabled.
+        Bots and users with :attr:`~Permissions.manage_channels` or
+        :attr:`~Permissions.manage_messages` bypass slowmode.
+
+        .. versionadded:: 2.2
     """
 
     __slots__ = ()
@@ -1121,8 +1142,7 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
         You cannot bulk delete more than 100 messages or messages that
         are older than 14 days old.
 
-        You must have the :attr:`~Permissions.manage_messages` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_messages` to do this.
 
         .. versionadded:: 2.0
 
@@ -1179,9 +1199,9 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
         ``check``. If a ``check`` is not provided then all messages are deleted
         without discrimination.
 
-        You must have the :attr:`~Permissions.manage_messages` permission to
+        You must have :attr:`~Permissions.manage_messages` to
         delete messages even if they are your own.
-        The :attr:`~Permissions.read_message_history` permission is
+        Having :attr:`~Permissions.read_message_history` is
         also needed to retrieve message history.
 
         .. versionadded:: 2.0
@@ -1250,7 +1270,7 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
 
         Gets the list of webhooks from this channel.
 
-        Requires :attr:`~.Permissions.manage_webhooks` permissions.
+        You must have :attr:`~.Permissions.manage_webhooks` to do this.
 
         .. versionadded:: 2.0
 
@@ -1275,7 +1295,7 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
 
         Creates a webhook for this channel.
 
-        Requires :attr:`~.Permissions.manage_webhooks` permissions.
+        You must have :attr:`~.Permissions.manage_webhooks` to do this.
 
         .. versionadded:: 2.0
 
@@ -1345,8 +1365,7 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
 
         Edits the channel.
 
-        You must have the :attr:`~Permissions.manage_channels` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_channels` to do this.
 
         .. versionchanged:: 1.3
             The ``overwrites`` keyword-only parameter was added.
@@ -1379,6 +1398,9 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
         category: Optional[:class:`CategoryChannel`]
             The new category for this channel. Can be ``None`` to remove the
             category.
+        slowmode_delay: :class:`int`
+            Specifies the slowmode rate limit for user in this channel, in seconds.
+            A value of ``0`` disables slowmode. The maximum value possible is ``21600``.
         reason: Optional[:class:`str`]
             The reason for editing this channel. Shows up on the audit log.
         overwrites: :class:`Mapping`
@@ -1409,7 +1431,6 @@ class VoiceChannel(discord.abc.Messageable, VocalGuildChannel):
             The newly edited voice channel. If the edit was only positional
             then ``None`` is returned instead.
         """
-
         payload = await self._edit(options, reason=reason)
         if payload is not None:
             # the payload will always be the proper channel payload
@@ -1469,6 +1490,13 @@ class StageChannel(VocalGuildChannel):
         The camera video quality for the stage channel's participants.
 
         .. versionadded:: 2.0
+    slowmode_delay: :class:`int`
+        The number of seconds a member must wait between sending messages
+        in this channel. A value of ``0`` denotes that it is disabled.
+        Bots and users with :attr:`~Permissions.manage_channels` or
+        :attr:`~Permissions.manage_messages` bypass slowmode.
+
+        .. versionadded:: 2.2
     """
 
     __slots__ = ('topic',)
@@ -1554,8 +1582,7 @@ class StageChannel(VocalGuildChannel):
 
         Create a stage instance.
 
-        You must have the :attr:`~Permissions.manage_channels` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_channels` to do this.
 
         .. versionadded:: 2.0
 
@@ -1645,8 +1672,7 @@ class StageChannel(VocalGuildChannel):
 
         Edits the channel.
 
-        You must have the :attr:`~Permissions.manage_channels` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_channels` to do this.
 
         .. versionchanged:: 2.0
             The ``topic`` parameter must now be set via :attr:`create_instance`.
@@ -1675,6 +1701,9 @@ class StageChannel(VocalGuildChannel):
         category: Optional[:class:`CategoryChannel`]
             The new category for this channel. Can be ``None`` to remove the
             category.
+        slowmode_delay: :class:`int`
+            Specifies the slowmode rate limit for user in this channel, in seconds.
+            A value of ``0`` disables slowmode. The maximum value possible is ``21600``.
         reason: Optional[:class:`str`]
             The reason for editing this channel. Shows up on the audit log.
         overwrites: :class:`Mapping`
@@ -1816,8 +1845,7 @@ class CategoryChannel(discord.abc.GuildChannel, Hashable):
 
         Edits the channel.
 
-        You must have the :attr:`~Permissions.manage_channels` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_channels` to do this.
 
         .. versionchanged:: 1.3
             The ``overwrites`` keyword-only parameter was added.
@@ -1962,6 +1990,95 @@ class CategoryChannel(discord.abc.GuildChannel, Hashable):
         return await self.guild.create_forum(name, category=self, **options)
 
 
+class ForumTag(Hashable):
+    """Represents a forum tag that can be applied to a thread within a :class:`ForumChannel`.
+
+    .. versionadded:: 2.1
+
+    .. container:: operations
+
+        .. describe:: x == y
+
+            Checks if two forum tags are equal.
+
+        .. describe:: x != y
+
+            Checks if two forum tags are not equal.
+
+        .. describe:: hash(x)
+
+            Returns the forum tag's hash.
+
+        .. describe:: str(x)
+
+            Returns the forum tag's name.
+
+
+    Attributes
+    -----------
+    id: :class:`int`
+        The ID of the tag. If this was manually created then the ID will be ``0``.
+    name: :class:`str`
+        The name of the tag. Can only be up to 20 characters.
+    moderated: :class:`bool`
+        Whether this tag can only be added or removed by a moderator with
+        the :attr:`~Permissions.manage_threads` permission.
+    emoji: Optional[:class:`PartialEmoji`]
+        The emoji that is used to represent this tag.
+        Note that if the emoji is a custom emoji, it will *not* have name information.
+    """
+
+    __slots__ = ('name', 'id', 'moderated', 'emoji')
+
+    def __init__(self, *, name: str, emoji: Optional[EmojiInputType] = None, moderated: bool = False) -> None:
+        self.name: str = name
+        self.id: int = 0
+        self.moderated: bool = moderated
+        self.emoji: Optional[PartialEmoji] = None
+        if isinstance(emoji, _EmojiTag):
+            self.emoji = emoji._to_partial()
+        elif isinstance(emoji, str):
+            self.emoji = PartialEmoji.from_str(emoji)
+        elif emoji is not None:
+            raise TypeError(f'emoji must be a Emoji, PartialEmoji, str or None not {emoji.__class__.__name__}')
+
+    @classmethod
+    def from_data(cls, *, state: ConnectionState, data: ForumTagPayload) -> Self:
+        self = cls.__new__(cls)
+        self.name = data['name']
+        self.id = int(data['id'])
+        self.moderated = data.get('moderated', False)
+
+        emoji_name = data['emoji_name'] or ''
+        emoji_id = utils._get_as_snowflake(data, 'emoji_id') or None  # Coerce 0 -> None
+        if not emoji_name and not emoji_id:
+            self.emoji = None
+        else:
+            self.emoji = PartialEmoji.with_state(state=state, name=emoji_name, id=emoji_id)
+        return self
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            'name': self.name,
+            'moderated': self.moderated,
+        }
+        if self.emoji is not None:
+            payload.update(self.emoji._to_forum_tag_payload())
+        else:
+            payload.update(emoji_id=None, emoji_name=None)
+
+        if self.id:
+            payload['id'] = self.id
+
+        return payload
+
+    def __repr__(self) -> str:
+        return f'<ForumTag id={self.id} name={self.name!r} emoji={self.emoji!r} moderated={self.moderated}>'
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class ForumChannel(discord.abc.GuildChannel, Hashable):
     """Represents a Discord guild forum channel.
 
@@ -1996,7 +2113,8 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
     category_id: Optional[:class:`int`]
         The category channel ID this forum belongs to, if applicable.
     topic: Optional[:class:`str`]
-        The forum's topic. ``None`` if it doesn't exist.
+        The forum's topic. ``None`` if it doesn't exist. Called "Guidelines" in the UI.
+        Can be up to 4096 characters long.
     position: :class:`int`
         The position in the channel list. This is a number that starts at 0. e.g. the
         top channel is position 0.
@@ -2006,13 +2124,27 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
         It may *not* point to an existing or valid thread or message.
     slowmode_delay: :class:`int`
         The number of seconds a member must wait between creating threads
-        in this forum. A value of `0` denotes that it is disabled.
+        in this forum. A value of ``0`` denotes that it is disabled.
         Bots and users with :attr:`~Permissions.manage_channels` or
         :attr:`~Permissions.manage_messages` bypass slowmode.
     nsfw: :class:`bool`
         If the forum is marked as "not safe for work" or "age restricted".
     default_auto_archive_duration: :class:`int`
         The default auto archive duration in minutes for threads created in this forum.
+    default_thread_slowmode_delay: :class:`int`
+        The default slowmode delay in seconds for threads created in this forum.
+
+        .. versionadded:: 2.1
+    default_reaction_emoji: Optional[:class:`PartialEmoji`]
+        The default reaction emoji for threads created in this forum to show in the
+        add reaction button.
+
+        .. versionadded:: 2.1
+    default_layout: :class:`ForumLayoutType`
+        The default layout for posts in this forum channel.
+        Defaults to :attr:`ForumLayoutType.not_set`.
+
+        .. versionadded:: 2.2
     """
 
     __slots__ = (
@@ -2029,6 +2161,11 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
         '_overwrites',
         'last_message_id',
         'default_auto_archive_duration',
+        'default_thread_slowmode_delay',
+        'default_reaction_emoji',
+        'default_layout',
+        '_available_tags',
+        '_flags',
     )
 
     def __init__(self, *, state: ConnectionState, guild: Guild, data: ForumChannelPayload):
@@ -2057,6 +2194,22 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
         self.slowmode_delay: int = data.get('rate_limit_per_user', 0)
         self.default_auto_archive_duration: ThreadArchiveDuration = data.get('default_auto_archive_duration', 1440)
         self.last_message_id: Optional[int] = utils._get_as_snowflake(data, 'last_message_id')
+        # This takes advantage of the fact that dicts are ordered since Python 3.7
+        tags = [ForumTag.from_data(state=self._state, data=tag) for tag in data.get('available_tags', [])]
+        self.default_thread_slowmode_delay: int = data.get('default_thread_rate_limit_per_user', 0)
+        self.default_layout: ForumLayoutType = try_enum(ForumLayoutType, data.get('default_forum_layout', 0))
+        self._available_tags: Dict[int, ForumTag] = {tag.id: tag for tag in tags}
+
+        self.default_reaction_emoji: Optional[PartialEmoji] = None
+        default_reaction_emoji = data.get('default_reaction_emoji')
+        if default_reaction_emoji:
+            self.default_reaction_emoji = PartialEmoji.with_state(
+                state=self._state,
+                id=utils._get_as_snowflake(default_reaction_emoji, 'emoji_id') or None,  # Coerce 0 -> None
+                name=default_reaction_emoji.get('emoji_name') or '',
+            )
+
+        self._flags: int = data.get('flags', 0)
         self._fill_overwrites(data)
 
     @property
@@ -2075,16 +2228,75 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
     @utils.copy_doc(discord.abc.GuildChannel.permissions_for)
     def permissions_for(self, obj: Union[Member, Role], /) -> Permissions:
         base = super().permissions_for(obj)
+        self._apply_implicit_permissions(base)
 
         # text channels do not have voice related permissions
         denied = Permissions.voice()
         base.value &= ~denied.value
         return base
 
+    def get_thread(self, thread_id: int, /) -> Optional[Thread]:
+        """Returns a thread with the given ID.
+
+        .. note::
+
+            This does not always retrieve archived threads, as they are not retained in the internal
+            cache. Use :func:`Guild.fetch_channel` instead.
+
+        .. versionadded:: 2.2
+
+        Parameters
+        -----------
+        thread_id: :class:`int`
+            The ID to search for.
+
+        Returns
+        --------
+        Optional[:class:`Thread`]
+            The returned thread or ``None`` if not found.
+        """
+        thread = self.guild.get_thread(thread_id)
+        if thread is not None and thread.parent_id == self.id:
+            return thread
+        return None
+
     @property
     def threads(self) -> List[Thread]:
         """List[:class:`Thread`]: Returns all the threads that you can see."""
         return [thread for thread in self.guild._threads.values() if thread.parent_id == self.id]
+
+    @property
+    def flags(self) -> ChannelFlags:
+        """:class:`ChannelFlags`: The flags associated with this thread.
+
+        .. versionadded:: 2.1
+        """
+        return ChannelFlags._from_value(self._flags)
+
+    @property
+    def available_tags(self) -> Sequence[ForumTag]:
+        """Sequence[:class:`ForumTag`]: Returns all the available tags for this forum.
+
+        .. versionadded:: 2.1
+        """
+        return utils.SequenceProxy(self._available_tags.values())
+
+    def get_tag(self, tag_id: int, /) -> Optional[ForumTag]:
+        """Returns the tag with the given ID.
+
+        .. versionadded:: 2.1
+
+        Parameters
+        ----------
+        tag_id: :class:`int`
+            The ID to search for.
+
+        Returns
+        -------
+        Optional[:class:`ForumTag`]
+            The tag with the given ID, or ``None`` if not found.
+        """
+        return self._available_tags.get(tag_id)
 
     def is_nsfw(self) -> bool:
         """:class:`bool`: Checks if the forum is NSFW."""
@@ -2119,6 +2331,11 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
         default_auto_archive_duration: ThreadArchiveDuration = ...,
         type: ChannelType = ...,
         overwrites: Mapping[OverwriteKeyT, PermissionOverwrite] = ...,
+        available_tags: Sequence[ForumTag] = ...,
+        default_thread_slowmode_delay: int = ...,
+        default_reaction_emoji: Optional[EmojiInputType] = ...,
+        default_layout: ForumLayoutType = ...,
+        require_tag: bool = ...,
     ) -> ForumChannel:
         ...
 
@@ -2127,8 +2344,7 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
 
         Edits the forum.
 
-        You must have the :attr:`~Permissions.manage_channels` permission to
-        use this.
+        You must have :attr:`~Permissions.manage_channels` to do this.
 
         Parameters
         ----------
@@ -2148,7 +2364,7 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
             category.
         slowmode_delay: :class:`int`
             Specifies the slowmode rate limit for user in this forum, in seconds.
-            A value of `0` disables slowmode. The maximum value possible is `21600`.
+            A value of ``0`` disables slowmode. The maximum value possible is ``21600``.
         type: :class:`ChannelType`
             Change the type of this text forum. Currently, only conversion between
             :attr:`ChannelType.text` and :attr:`ChannelType.news` is supported. This
@@ -2161,13 +2377,34 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
         default_auto_archive_duration: :class:`int`
             The new default auto archive duration in minutes for threads created in this channel.
             Must be one of ``60``, ``1440``, ``4320``, or ``10080``.
+        available_tags: Sequence[:class:`ForumTag`]
+            The new available tags for this forum.
+
+            .. versionadded:: 2.1
+        default_thread_slowmode_delay: :class:`int`
+            The new default slowmode delay for threads in this channel.
+
+            .. versionadded:: 2.1
+        default_reaction_emoji: Optional[Union[:class:`Emoji`, :class:`PartialEmoji`, :class:`str`]]
+            The new default reaction emoji for threads in this channel.
+
+            .. versionadded:: 2.1
+        default_layout: :class:`ForumLayoutType`
+            The new default layout for posts in this forum.
+
+            .. versionadded:: 2.2
+        require_tag: :class:`bool`
+            Whether to require a tag for threads in this channel or not.
+
+            .. versionadded:: 2.1
 
         Raises
         ------
         ValueError
             The new ``position`` is less than 0 or greater than the number of channels.
         TypeError
-            The permission overwrite information is not in proper form.
+            The permission overwrite information is not in proper form or a type
+            is not the expected type.
         Forbidden
             You do not have permissions to edit the forum.
         HTTPException
@@ -2180,10 +2417,99 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
             then ``None`` is returned instead.
         """
 
+        try:
+            tags: Sequence[ForumTag] = options.pop('available_tags')
+        except KeyError:
+            pass
+        else:
+            options['available_tags'] = [tag.to_dict() for tag in tags]
+
+        try:
+            default_reaction_emoji: Optional[EmojiInputType] = options.pop('default_reaction_emoji')
+        except KeyError:
+            pass
+        else:
+            if default_reaction_emoji is None:
+                options['default_reaction_emoji'] = None
+            elif isinstance(default_reaction_emoji, _EmojiTag):
+                options['default_reaction_emoji'] = default_reaction_emoji._to_partial()._to_forum_tag_payload()
+            elif isinstance(default_reaction_emoji, str):
+                options['default_reaction_emoji'] = PartialEmoji.from_str(default_reaction_emoji)._to_forum_tag_payload()
+
+        try:
+            require_tag = options.pop('require_tag')
+        except KeyError:
+            pass
+        else:
+            flags = self.flags
+            flags.require_tag = require_tag
+            options['flags'] = flags.value
+
+        try:
+            layout = options.pop('default_layout')
+        except KeyError:
+            pass
+        else:
+            if not isinstance(layout, ForumLayoutType):
+                raise TypeError(f'default_layout parameter must be a ForumLayoutType not {layout.__class__.__name__}')
+
+            options['default_forum_layout'] = layout.value
+
         payload = await self._edit(options, reason=reason)
         if payload is not None:
             # the payload will always be the proper channel payload
             return self.__class__(state=self._state, guild=self.guild, data=payload)  # type: ignore
+
+    async def create_tag(
+        self,
+        *,
+        name: str,
+        emoji: Optional[PartialEmoji] = None,
+        moderated: bool = False,
+        reason: Optional[str] = None,
+    ) -> ForumTag:
+        """|coro|
+
+        Creates a new tag in this forum.
+
+        You must have :attr:`~Permissions.manage_channels` to do this.
+
+        Parameters
+        ----------
+        name: :class:`str`
+            The name of the tag. Can only be up to 20 characters.
+        emoji: Optional[Union[:class:`str`, :class:`PartialEmoji`]]
+            The emoji to use for the tag.
+        moderated: :class:`bool`
+            Whether the tag can only be applied by moderators.
+        reason: Optional[:class:`str`]
+            The reason for creating this tag. Shows up on the audit log.
+
+        Raises
+        ------
+        Forbidden
+            You do not have permissions to create a tag in this forum.
+        HTTPException
+            Creating the tag failed.
+
+        Returns
+        -------
+        :class:`ForumTag`
+            The newly created tag.
+        """
+
+        prior = list(self._available_tags.values())
+        result = ForumTag(name=name, emoji=emoji, moderated=moderated)
+        prior.append(result)
+        payload = await self._state.http.edit_channel(
+            self.id, reason=reason, available_tags=[tag.to_dict() for tag in prior]
+        )
+        try:
+            result.id = int(payload['available_tags'][-1]['id'])  # type: ignore
+        except (KeyError, IndexError, ValueError):
+            pass
+
+        return result
 
     async def create_thread(
         self,
@@ -2200,6 +2526,7 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
         stickers: Sequence[Union[GuildSticker, StickerItem]] = MISSING,
         allowed_mentions: AllowedMentions = MISSING,
         mention_author: bool = MISSING,
+        applied_tags: Sequence[ForumTag] = MISSING,
         view: View = MISSING,
         suppress_embeds: bool = False,
         reason: Optional[str] = None,
@@ -2211,6 +2538,9 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
         This thread is a public thread with the initial message given. Currently in order
         to start a thread in this forum, the user needs :attr:`~discord.Permissions.send_messages`.
 
+        You must send at least one of ``content``, ``embed``, ``embeds``, ``file``, ``files``,
+        or ``view`` to create a thread in a forum, since forum channels must have a starter message.
+
         Parameters
         -----------
         name: :class:`str`
@@ -2220,7 +2550,7 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
             If not provided, the channel's default auto archive duration is used.
         slowmode_delay: Optional[:class:`int`]
             Specifies the slowmode rate limit for user in this channel, in seconds.
-            The maximum value possible is `21600`. By default no slowmode rate limit
+            The maximum value possible is ``21600``. By default no slowmode rate limit
             if this is ``None``.
         content: Optional[:class:`str`]
             The content of the message to send with the thread.
@@ -2243,6 +2573,8 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
             are used instead.
         mention_author: :class:`bool`
             If set, overrides the :attr:`~discord.AllowedMentions.replied_user` attribute of ``allowed_mentions``.
+        applied_tags: List[:class:`discord.ForumTag`]
+            A list of tags to apply to the thread.
         view: :class:`discord.ui.View`
             A Discord UI View to add to the message.
         stickers: Sequence[Union[:class:`~discord.GuildSticker`, :class:`~discord.StickerItem`]]
@@ -2279,7 +2611,7 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
             sticker_ids: SnowflakeList = [s.id for s in stickers]
 
         if view and not hasattr(view, '__discord_ui_view__'):
-            raise TypeError(f'view parameter must be View not {view.__class__!r}')
+            raise TypeError(f'view parameter must be View not {view.__class__.__name__}')
 
         if suppress_embeds:
             from .message import MessageFlags  # circular import
@@ -2296,6 +2628,9 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
             'rate_limit_per_user': slowmode_delay,
             'type': 11,  # Private threads don't seem to be allowed
         }
+
+        if applied_tags is not MISSING:
+            channel_payload['applied_tags'] = [str(tag.id) for tag in applied_tags]
 
         with handle_message_parameters(
             content=content,
@@ -2328,7 +2663,7 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
 
         Gets the list of webhooks from this channel.
 
-        Requires :attr:`~.Permissions.manage_webhooks` permissions.
+        You must have :attr:`~.Permissions.manage_webhooks` to do this.
 
         Raises
         -------
@@ -2351,7 +2686,7 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
 
         Creates a webhook for this channel.
 
-        Requires :attr:`~.Permissions.manage_webhooks` permissions.
+        You must have :attr:`~.Permissions.manage_webhooks` to do this.
 
         Parameters
         -------------
@@ -2383,6 +2718,73 @@ class ForumChannel(discord.abc.GuildChannel, Hashable):
 
         data = await self._state.http.create_webhook(self.id, name=str(name), avatar=avatar, reason=reason)
         return Webhook.from_state(data, state=self._state)
+
+    async def archived_threads(
+        self,
+        *,
+        limit: Optional[int] = 100,
+        before: Optional[Union[Snowflake, datetime.datetime]] = None,
+    ) -> AsyncIterator[Thread]:
+        """Returns an :term:`asynchronous iterator` that iterates over all archived threads in this forum
+        in order of decreasing :attr:`Thread.archive_timestamp`.
+
+        You must have :attr:`~Permissions.read_message_history` to do this.
+
+        .. versionadded:: 2.0
+
+        Parameters
+        -----------
+        limit: Optional[:class:`bool`]
+            The number of threads to retrieve.
+            If ``None``, retrieves every archived thread in the channel. Note, however,
+            that this would make it a slow operation.
+        before: Optional[Union[:class:`abc.Snowflake`, :class:`datetime.datetime`]]
+            Retrieve archived channels before the given date or ID.
+
+        Raises
+        ------
+        Forbidden
+            You do not have permissions to get archived threads.
+        HTTPException
+            The request to get the archived threads failed.
+
+        Yields
+        -------
+        :class:`Thread`
+            The archived threads.
+        """
+        before_timestamp = None
+
+        if isinstance(before, datetime.datetime):
+            before_timestamp = before.isoformat()
+        elif before is not None:
+            before_timestamp = utils.snowflake_time(before.id).isoformat()
+
+        update_before = lambda data: data['thread_metadata']['archive_timestamp']
+
+        while True:
+            retrieve = 100
+            if limit is not None:
+                if limit <= 0:
+                    return
+                retrieve = max(2, min(retrieve, limit))
+
+            data = await self.guild._state.http.get_public_archived_threads(self.id, before=before_timestamp, limit=retrieve)
+
+            threads = data.get('threads', [])
+            for raw_thread in threads:
+                yield Thread(guild=self.guild, state=self.guild._state, data=raw_thread)
+                # Currently the API doesn't let you request less than 2 threads.
+                # Bail out early if we had to retrieve more than what the limit was.
+                if limit is not None:
+                    limit -= 1
+                    if limit <= 0:
+                        return
+
+            if not data.get('has_more', False):
+                return
+
+            before_timestamp = update_before(threads[-1])
 
 
 class DMChannel(discord.abc.Messageable, discord.abc.PrivateChannel, Hashable):
@@ -2486,10 +2888,18 @@ class DMChannel(discord.abc.Messageable, discord.abc.PrivateChannel, Hashable):
 
         - :attr:`~Permissions.send_tts_messages`: You cannot send TTS messages in a DM.
         - :attr:`~Permissions.manage_messages`: You cannot delete others messages in a DM.
+        - :attr:`~Permissions.create_private_threads`: There are no threads in a DM.
+        - :attr:`~Permissions.create_public_threads`: There are no threads in a DM.
+        - :attr:`~Permissions.manage_threads`: There are no threads in a DM.
+        - :attr:`~Permissions.send_messages_in_threads`: There are no threads in a DM.
 
         .. versionchanged:: 2.0
 
             ``obj`` parameter is now positional-only.
+
+        .. versionchanged:: 2.1
+
+            Thread related permissions are now set to ``False``.
 
         Parameters
         -----------
@@ -2652,12 +3062,20 @@ class GroupChannel(discord.abc.Messageable, discord.abc.PrivateChannel, Hashable
 
         - :attr:`~Permissions.send_tts_messages`: You cannot send TTS messages in a DM.
         - :attr:`~Permissions.manage_messages`: You cannot delete others messages in a DM.
+        - :attr:`~Permissions.create_private_threads`: There are no threads in a DM.
+        - :attr:`~Permissions.create_public_threads`: There are no threads in a DM.
+        - :attr:`~Permissions.manage_threads`: There are no threads in a DM.
+        - :attr:`~Permissions.send_messages_in_threads`: There are no threads in a DM.
 
         This also checks the kick_members permission if the user is the owner.
 
         .. versionchanged:: 2.0
 
             ``obj`` parameter is now positional-only.
+
+        .. versionchanged:: 2.1
+
+            Thread related permissions are now set to ``False``.
 
         Parameters
         -----------

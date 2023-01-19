@@ -318,6 +318,8 @@ Quick example:
 
 See `aiohttp's full documentation <http://aiohttp.readthedocs.io/en/stable/>`_ for more information.
 
+.. _local_image:
+
 How do I use a local image file for an embed image?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -341,8 +343,8 @@ Quick example:
 Is there an event for audit log entries being created?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Since Discord does not dispatch this information in the gateway, the library cannot provide this information.
-This is currently a Discord limitation.
+This event is now available in the library and Discord as of version 2.2. It can be found under :func:`on_audit_log_entry_create`.
+
 
 Commands Extension
 -------------------

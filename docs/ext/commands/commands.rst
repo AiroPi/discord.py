@@ -40,9 +40,13 @@ as seen in the example above. The second is using the :func:`~ext.commands.comma
 
 Essentially, these two are equivalent: ::
 
+    import discord
     from discord.ext import commands
 
-    bot = commands.Bot(command_prefix='$')
+    intents = discord.Intents.default()
+    intents.message_content = True
+
+    bot = commands.Bot(command_prefix='$', intents=intents)
 
     @bot.command()
     async def test(ctx):
@@ -613,8 +617,9 @@ When mixed with the :data:`typing.Optional` converter you can provide simple and
                        delete_days: typing.Optional[int] = 0, *,
                        reason: str):
         """Mass bans members with an optional delete_days parameter"""
+        delete_seconds = delete_days * 86400 # one day
         for member in members:
-            await member.ban(delete_message_days=delete_days, reason=reason)
+            await member.ban(delete_message_seconds=delete_seconds, reason=reason)
 
 
 This command can be invoked any of the following ways:

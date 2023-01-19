@@ -153,7 +153,6 @@ The following have been changed to :func:`runtime-checkable <typing.runtime_chec
 
 - :class:`abc.Snowflake`
 - :class:`abc.User`
-- :class:`abc.PrivateChannel`
 
 The following have been changed to subclass :class:`~typing.Protocol`:
 
@@ -163,6 +162,7 @@ The following have been changed to subclass :class:`~typing.Protocol`:
 The following have been changed to use the default metaclass instead of :class:`abc.ABCMeta`:
 
 - :class:`abc.Messageable`
+- :class:`abc.PrivateChannel`
 
 ``datetime`` Objects Are Now UTC-Aware
 ----------------------------------------
@@ -255,7 +255,7 @@ The following now accept aware :class:`~datetime.datetime` and assume that if th
 - :attr:`Embed` constructor
 - :attr:`Embed.timestamp` property setter
 - :func:`utils.sleep_until` function
-- ``utils.time_snowflake`` function
+- :func:`utils.time_snowflake` function
 
 Currently, there's only one place in this library that doesn't accept naive :class:`datetime.datetime` objects:
 
@@ -983,7 +983,7 @@ In the future this may include :class:`StageChannel` when Discord implements it.
 Removal of ``StoreChannel``
 -----------------------------
 
-Discord's API has removed store channels as of `March 10th, 2022 <https://support-dev.discord.com/hc/en-us/articles/4414590563479>`_. Therefore, the library has removed support for it as well.
+Discord's API has removed store channels as of `March 10th, 2022 <https://support-dev.discord.com/hc/en-us/articles/6309018858647>`_. Therefore, the library has removed support for it as well.
 
 This removes the following:
 
@@ -1267,7 +1267,7 @@ The following changes have been made:
 
 - :meth:`Permissions.stage_moderator` now includes the :attr:`Permissions.manage_channels` permission and the :attr:`Permissions.request_to_speak` permission is no longer included.
 
-- :attr:`File.filename` will no longer be ``None``, in situations where previously this was the case the filename is set to `'untitled'`.
+- :attr:`File.filename` will no longer be ``None``, in situations where previously this was the case the filename is set to ``'untitled'``.
 
 - :attr:`Message.application` will no longer be a raw :class:`dict` of the API payload and now returns an instance of :class:`MessageApplication`.
 
@@ -1472,6 +1472,8 @@ Miscellaneous Changes
 
     - To override a cog, the new ``override`` parameter can be used.
 
+- When passing a callable to ``type`` argument of :meth:`~ext.commands.cooldown`,
+  it now needs to accept :class:`~ext.commands.Context` rather than :class:`Message` as its only argument.
 - Metaclass of :class:`~ext.commands.Context` changed from :class:`abc.ABCMeta` to :class:`type`.
 - Changed type of :attr:`ext.commands.Command.clean_params` from :class:`collections.OrderedDict` to :class:`dict`.
   As the latter is guaranteed to preserve insertion order since Python 3.7.

@@ -319,7 +319,7 @@ class View:
             raise ValueError('maximum number of children exceeded')
 
         if not isinstance(item, Item):
-            raise TypeError(f'expected Item not {item.__class__!r}')
+            raise TypeError(f'expected Item not {item.__class__.__name__}')
 
         self.__weights.add_item(item)
 
@@ -357,7 +357,7 @@ class View:
         self.__weights.clear()
         return self
 
-    async def interaction_check(self, interaction: Interaction) -> bool:
+    async def interaction_check(self, interaction: Interaction, /) -> bool:
         """|coro|
 
         A callback that is called when an interaction happens within the view
@@ -392,7 +392,7 @@ class View:
         """
         pass
 
-    async def on_error(self, interaction: Interaction, error: Exception, item: Item[Any]) -> None:
+    async def on_error(self, interaction: Interaction, error: Exception, item: Item[Any], /) -> None:
         """|coro|
 
         A callback that is called when an item's callback or :meth:`interaction_check`
@@ -413,14 +413,14 @@ class View:
 
     async def _scheduled_task(self, item: Item, interaction: Interaction):
         try:
-            if self.timeout:
-                self.__timeout_expiry = time.monotonic() + self.timeout
-
-            item._refresh_state(interaction.data)  # type: ignore
+            item._refresh_state(interaction, interaction.data)  # type: ignore
 
             allow = await self.interaction_check(interaction)
             if not allow:
                 return
+
+            if self.timeout:
+                self.__timeout_expiry = time.monotonic() + self.timeout
 
             await item.callback(interaction)
         except Exception as e:
@@ -508,7 +508,9 @@ class View:
         return self.timeout is None and all(item.is_persistent() for item in self._children)
 
     async def wait(self) -> bool:
-        """Waits until the view has finished interacting.
+        """|coro|
+
+        Waits until the view has finished interacting.
 
         A view is considered finished when :meth:`stop` is called
         or it times out.

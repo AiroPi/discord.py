@@ -27,9 +27,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import sys
-import os
 from typing import (
+    TYPE_CHECKING,
     Any,
     AsyncIterator,
     Callable,
@@ -37,13 +36,14 @@ from typing import (
     Dict,
     Generator,
     List,
+    Literal,
     Optional,
     Sequence,
-    TYPE_CHECKING,
     Tuple,
     Type,
     TypeVar,
     Union,
+    overload,
 )
 
 import aiohttp
@@ -77,15 +77,43 @@ from .threads import Thread
 from .sticker import GuildSticker, StandardSticker, StickerPack, _sticker_factory
 
 if TYPE_CHECKING:
-    from typing_extensions import Self
     from types import TracebackType
-    from .types.guild import Guild as GuildPayload
-    from .abc import SnowflakeTime, Snowflake, PrivateChannel
+
+    from typing_extensions import Self
+
+    from .abc import Messageable, PrivateChannel, Snowflake, SnowflakeTime
+    from .app_commands import Command, ContextMenu
+    from .automod import AutoModAction, AutoModRule
+    from .channel import DMChannel, GroupChannel
+    from .ext.commands import AutoShardedBot, Bot, Context, CommandError
     from .guild import GuildChannel
-    from .channel import DMChannel
+    from .integrations import Integration
+    from .interactions import Interaction
+    from .member import Member, VoiceState
     from .message import Message
-    from .member import Member
+    from .raw_models import (
+        RawAppCommandPermissionsUpdateEvent,
+        RawBulkMessageDeleteEvent,
+        RawIntegrationDeleteEvent,
+        RawMemberRemoveEvent,
+        RawMessageDeleteEvent,
+        RawMessageUpdateEvent,
+        RawReactionActionEvent,
+        RawReactionClearEmojiEvent,
+        RawReactionClearEvent,
+        RawThreadDeleteEvent,
+        RawThreadMembersUpdate,
+        RawThreadUpdateEvent,
+        RawTypingEvent,
+    )
+    from .reaction import Reaction
+    from .role import Role
+    from .scheduled_event import ScheduledEvent
+    from .threads import ThreadMember
+    from .types.guild import Guild as GuildPayload
     from .voice_client import VoiceProtocol
+    from .audit_logs import AuditLogEntry
+
 
 # fmt: off
 __all__ = (
@@ -93,7 +121,9 @@ __all__ = (
 )
 # fmt: on
 
-Coro = TypeVar('Coro', bound=Callable[..., Coroutine[Any, Any, Any]])
+T = TypeVar('T')
+Coro = Coroutine[Any, Any, T]
+CoroT = TypeVar('CoroT', bound=Callable[..., Coro[Any]])
 
 _log = logging.getLogger(__name__)
 
@@ -111,61 +141,6 @@ class _LoopSentinel:
 
 
 _loop: Any = _LoopSentinel()
-
-
-def stream_supports_colour(stream: Any) -> bool:
-    is_a_tty = hasattr(stream, 'isatty') and stream.isatty()
-    if sys.platform != 'win32':
-        return is_a_tty
-
-    # ANSICON checks for things like ConEmu
-    # WT_SESSION checks if this is Windows Terminal
-    # VSCode built-in terminal supports colour too
-    return is_a_tty and ('ANSICON' in os.environ or 'WT_SESSION' in os.environ or os.environ.get('TERM_PROGRAM') == 'vscode')
-
-
-class _ColourFormatter(logging.Formatter):
-
-    # ANSI codes are a bit weird to decipher if you're unfamiliar with them, so here's a refresher
-    # It starts off with a format like \x1b[XXXm where XXX is a semicolon separated list of commands
-    # The important ones here relate to colour.
-    # 30-37 are black, red, green, yellow, blue, magenta, cyan and white in that order
-    # 40-47 are the same except for the background
-    # 90-97 are the same but "bright" foreground
-    # 100-107 are the same as the bright ones but for the background.
-    # 1 means bold, 2 means dim, 0 means reset, and 4 means underline.
-
-    LEVEL_COLOURS = [
-        (logging.DEBUG, '\x1b[40;1m'),
-        (logging.INFO, '\x1b[34;1m'),
-        (logging.WARNING, '\x1b[33;1m'),
-        (logging.ERROR, '\x1b[31m'),
-        (logging.CRITICAL, '\x1b[41m'),
-    ]
-
-    FORMATS = {
-        level: logging.Formatter(
-            f'\x1b[30;1m%(asctime)s\x1b[0m {colour}%(levelname)-8s\x1b[0m \x1b[35m%(name)s\x1b[0m %(message)s',
-            '%Y-%m-%d %H:%M:%S',
-        )
-        for level, colour in LEVEL_COLOURS
-    }
-
-    def format(self, record):
-        formatter = self.FORMATS.get(record.levelno)
-        if formatter is None:
-            formatter = self.FORMATS[logging.DEBUG]
-
-        # Override the traceback to always print in red
-        if record.exc_info:
-            text = formatter.formatException(record.exc_info)
-            record.exc_text = f'\x1b[31m{text}\x1b[0m'
-
-        output = formatter.format(record)
-
-        # Remove the cache layer
-        record.exc_text = None
-        return output
 
 
 class Client:
@@ -307,7 +282,7 @@ class Client:
         }
 
         self._enable_debug_events: bool = options.pop('enable_debug_events', False)
-        self._connection: ConnectionState = self._get_state(intents=intents, **options)
+        self._connection: ConnectionState[Self] = self._get_state(intents=intents, **options)
         self._connection.shard_count = self.shard_count
         self._closed: bool = False
         self._ready: asyncio.Event = MISSING
@@ -631,7 +606,7 @@ class Client:
             await self._async_setup_hook()
 
         if not isinstance(token, str):
-            raise TypeError(f'expected token to be a str, received {token.__class__!r} instead')
+            raise TypeError(f'expected token to be a str, received {token.__class__.__name__} instead')
         token = token.strip()
 
         data = await self.http.static_login(token)
@@ -810,6 +785,7 @@ class Client:
         log_handler: Optional[logging.Handler] = MISSING,
         log_formatter: logging.Formatter = MISSING,
         log_level: int = MISSING,
+        root_logger: bool = False,
     ) -> None:
         """A blocking call that abstracts away the event loop
         initialisation from you.
@@ -857,9 +833,13 @@ class Client:
             The default log level for the library's logger. This is only applied if the
             ``log_handler`` parameter is not ``None``. Defaults to ``logging.INFO``.
 
-            Note that the *root* logger will always be set to ``logging.INFO`` and this
-            only controls the library's log level. To control the root logger's level,
-            you can use ``logging.getLogger().setLevel(level)``.
+            .. versionadded:: 2.0
+        root_logger: :class:`bool`
+            Whether to set up the root logger rather than the library logger.
+            By default, only the library logger (``'discord'``) is set up. If this
+            is set to ``True`` then the root logger is set up as well.
+
+            Defaults to ``False``.
 
             .. versionadded:: 2.0
         """
@@ -868,27 +848,13 @@ class Client:
             async with self:
                 await self.start(token, reconnect=reconnect)
 
-        if log_level is MISSING:
-            log_level = logging.INFO
-
-        if log_handler is MISSING:
-            log_handler = logging.StreamHandler()
-
-        if log_formatter is MISSING:
-            if isinstance(log_handler, logging.StreamHandler) and stream_supports_colour(log_handler.stream):
-                log_formatter = _ColourFormatter()
-            else:
-                dt_fmt = '%Y-%m-%d %H:%M:%S'
-                log_formatter = logging.Formatter('[{asctime}] [{levelname:<8}] {name}: {message}', dt_fmt, style='{')
-
-        logger = None
         if log_handler is not None:
-            library, _, _ = __name__.partition('.')
-            logger = logging.getLogger(library)
-
-            log_handler.setFormatter(log_formatter)
-            logger.setLevel(log_level)
-            logger.addHandler(log_handler)
+            utils.setup_logging(
+                handler=log_handler,
+                formatter=log_formatter,
+                level=log_level,
+                root=root_logger,
+            )
 
         try:
             asyncio.run(runner())
@@ -897,9 +863,6 @@ class Client:
             # `asyncio.run` handles the loop cleanup
             # and `self.start` closes all sockets and the HTTPClient instance.
             return
-        finally:
-            if log_handler is not None and logger is not None:
-                logger.removeHandler(log_handler)
 
     # properties
 
@@ -957,7 +920,7 @@ class Client:
         if value is None or isinstance(value, AllowedMentions):
             self._connection.allowed_mentions = value
         else:
-            raise TypeError(f'allowed_mentions must be AllowedMentions not {value.__class__!r}')
+            raise TypeError(f'allowed_mentions must be AllowedMentions not {value.__class__.__name__}')
 
     @property
     def intents(self) -> Intents:
@@ -1179,7 +1142,698 @@ class Client:
                 'Please use the login method or asynchronous context manager before calling this method'
             )
 
-    def wait_for(
+    # App Commands
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_app_command_permissions_update'],
+        /,
+        *,
+        check: Optional[Callable[[RawAppCommandPermissionsUpdateEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawAppCommandPermissionsUpdateEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['app_command_completion'],
+        /,
+        *,
+        check: Optional[Callable[[Interaction[Self], Union[Command, ContextMenu]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Interaction[Self], Union[Command, ContextMenu]]:
+        ...
+
+    # AutoMod
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['automod_rule_create', 'automod_rule_update', 'automod_rule_delete'],
+        /,
+        *,
+        check: Optional[Callable[[AutoModRule], bool]],
+        timeout: Optional[float] = None,
+    ) -> AutoModRule:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['automod_action'],
+        /,
+        *,
+        check: Optional[Callable[[AutoModAction], bool]],
+        timeout: Optional[float] = None,
+    ) -> AutoModAction:
+        ...
+
+    # Channels
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['private_channel_update'],
+        /,
+        *,
+        check: Optional[Callable[[GroupChannel, GroupChannel], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[GroupChannel, GroupChannel]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['private_channel_pins_update'],
+        /,
+        *,
+        check: Optional[Callable[[PrivateChannel, datetime.datetime], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[PrivateChannel, datetime.datetime]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_channel_delete', 'guild_channel_create'],
+        /,
+        *,
+        check: Optional[Callable[[GuildChannel], bool]],
+        timeout: Optional[float] = None,
+    ) -> GuildChannel:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_channel_update'],
+        /,
+        *,
+        check: Optional[Callable[[GuildChannel, GuildChannel], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[GuildChannel, GuildChannel]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_channel_pins_update'],
+        /,
+        *,
+        check: Optional[
+            Callable[
+                [Union[GuildChannel, Thread], Optional[datetime.datetime]],
+                bool,
+            ]
+        ],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Union[GuildChannel, Thread], Optional[datetime.datetime]]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['typing'],
+        /,
+        *,
+        check: Optional[Callable[[Messageable, Union[User, Member], datetime.datetime], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Messageable, Union[User, Member], datetime.datetime]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_typing'],
+        /,
+        *,
+        check: Optional[Callable[[RawTypingEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawTypingEvent:
+        ...
+
+    # Debug & Gateway events
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['connect', 'disconnect', 'ready', 'resumed'],
+        /,
+        *,
+        check: Optional[Callable[[], bool]],
+        timeout: Optional[float] = None,
+    ) -> None:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['shard_connect', 'shard_disconnect', 'shard_ready', 'shard_resumed'],
+        /,
+        *,
+        check: Optional[Callable[[int], bool]],
+        timeout: Optional[float] = None,
+    ) -> int:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['socket_event_type', 'socket_raw_receive'],
+        /,
+        *,
+        check: Optional[Callable[[str], bool]],
+        timeout: Optional[float] = None,
+    ) -> str:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['socket_raw_send'],
+        /,
+        *,
+        check: Optional[Callable[[Union[str, bytes]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Union[str, bytes]:
+        ...
+
+    # Guilds
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal[
+            'guild_available',
+            'guild_unavailable',
+            'guild_join',
+            'guild_remove',
+        ],
+        /,
+        *,
+        check: Optional[Callable[[Guild], bool]],
+        timeout: Optional[float] = None,
+    ) -> Guild:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_update'],
+        /,
+        *,
+        check: Optional[Callable[[Guild, Guild], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Guild, Guild]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_emojis_update'],
+        /,
+        *,
+        check: Optional[Callable[[Guild, Sequence[Emoji], Sequence[Emoji]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Guild, Sequence[Emoji], Sequence[Emoji]]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_stickers_update'],
+        /,
+        *,
+        check: Optional[Callable[[Guild, Sequence[GuildSticker], Sequence[GuildSticker]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Guild, Sequence[GuildSticker], Sequence[GuildSticker]]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['invite_create', 'invite_delete'],
+        /,
+        *,
+        check: Optional[Callable[[Invite], bool]],
+        timeout: Optional[float] = None,
+    ) -> Invite:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['audit_log_entry_create'],
+        /,
+        *,
+        check: Optional[Callable[[AuditLogEntry], bool]],
+        timeout: Optional[float] = None,
+    ) -> AuditLogEntry:
+        ...
+
+    # Integrations
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['integration_create', 'integration_update'],
+        /,
+        *,
+        check: Optional[Callable[[Integration], bool]],
+        timeout: Optional[float] = None,
+    ) -> Integration:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_integrations_update'],
+        /,
+        *,
+        check: Optional[Callable[[Guild], bool]],
+        timeout: Optional[float] = None,
+    ) -> Guild:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['webhooks_update'],
+        /,
+        *,
+        check: Optional[Callable[[GuildChannel], bool]],
+        timeout: Optional[float] = None,
+    ) -> GuildChannel:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_integration_delete'],
+        /,
+        *,
+        check: Optional[Callable[[RawIntegrationDeleteEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawIntegrationDeleteEvent:
+        ...
+
+    # Interactions
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['interaction'],
+        /,
+        *,
+        check: Optional[Callable[[Interaction[Self]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Interaction[Self]:
+        ...
+
+    # Members
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['member_join', 'member_remove'],
+        /,
+        *,
+        check: Optional[Callable[[Member], bool]],
+        timeout: Optional[float] = None,
+    ) -> Member:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_member_remove'],
+        /,
+        *,
+        check: Optional[Callable[[RawMemberRemoveEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawMemberRemoveEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['member_update', 'presence_update'],
+        /,
+        *,
+        check: Optional[Callable[[Member, Member], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Member, Member]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['user_update'],
+        /,
+        *,
+        check: Optional[Callable[[User, User], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[User, User]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['member_ban'],
+        /,
+        *,
+        check: Optional[Callable[[Guild, Union[User, Member]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Guild, Union[User, Member]]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['member_unban'],
+        /,
+        *,
+        check: Optional[Callable[[Guild, User], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Guild, User]:
+        ...
+
+    # Messages
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['message', 'message_delete'],
+        /,
+        *,
+        check: Optional[Callable[[Message], bool]],
+        timeout: Optional[float] = None,
+    ) -> Message:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['message_edit'],
+        /,
+        *,
+        check: Optional[Callable[[Message, Message], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Message, Message]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['bulk_message_delete'],
+        /,
+        *,
+        check: Optional[Callable[[List[Message]], bool]],
+        timeout: Optional[float] = None,
+    ) -> List[Message]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_message_edit'],
+        /,
+        *,
+        check: Optional[Callable[[RawMessageUpdateEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawMessageUpdateEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_message_delete'],
+        /,
+        *,
+        check: Optional[Callable[[RawMessageDeleteEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawMessageDeleteEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_bulk_message_delete'],
+        /,
+        *,
+        check: Optional[Callable[[RawBulkMessageDeleteEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawBulkMessageDeleteEvent:
+        ...
+
+    # Reactions
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['reaction_add', 'reaction_remove'],
+        /,
+        *,
+        check: Optional[Callable[[Reaction, Union[Member, User]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Reaction, Union[Member, User]]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['reaction_clear'],
+        /,
+        *,
+        check: Optional[Callable[[Message, List[Reaction]], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Message, List[Reaction]]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['reaction_clear_emoji'],
+        /,
+        *,
+        check: Optional[Callable[[Reaction], bool]],
+        timeout: Optional[float] = None,
+    ) -> Reaction:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_reaction_add', 'raw_reaction_remove'],
+        /,
+        *,
+        check: Optional[Callable[[RawReactionActionEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawReactionActionEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_reaction_clear'],
+        /,
+        *,
+        check: Optional[Callable[[RawReactionClearEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawReactionClearEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_reaction_clear_emoji'],
+        /,
+        *,
+        check: Optional[Callable[[RawReactionClearEmojiEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawReactionClearEmojiEvent:
+        ...
+
+    # Roles
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_role_create', 'guild_role_delete'],
+        /,
+        *,
+        check: Optional[Callable[[Role], bool]],
+        timeout: Optional[float] = None,
+    ) -> Role:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['guild_role_update'],
+        /,
+        *,
+        check: Optional[Callable[[Role, Role], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Role, Role]:
+        ...
+
+    # Scheduled Events
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['scheduled_event_create', 'scheduled_event_delete'],
+        /,
+        *,
+        check: Optional[Callable[[ScheduledEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> ScheduledEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['scheduled_event_user_add', 'scheduled_event_user_remove'],
+        /,
+        *,
+        check: Optional[Callable[[ScheduledEvent, User], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[ScheduledEvent, User]:
+        ...
+
+    # Stages
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['stage_instance_create', 'stage_instance_delete'],
+        /,
+        *,
+        check: Optional[Callable[[StageInstance], bool]],
+        timeout: Optional[float] = None,
+    ) -> StageInstance:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['stage_instance_update'],
+        /,
+        *,
+        check: Optional[Callable[[StageInstance, StageInstance], bool]],
+        timeout: Optional[float] = None,
+    ) -> Coroutine[Any, Any, Tuple[StageInstance, StageInstance]]:
+        ...
+
+    # Threads
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['thread_create', 'thread_join', 'thread_remove', 'thread_delete'],
+        /,
+        *,
+        check: Optional[Callable[[Thread], bool]],
+        timeout: Optional[float] = None,
+    ) -> Thread:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['thread_update'],
+        /,
+        *,
+        check: Optional[Callable[[Thread, Thread], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Thread, Thread]:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_thread_update'],
+        /,
+        *,
+        check: Optional[Callable[[RawThreadUpdateEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawThreadUpdateEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_thread_delete'],
+        /,
+        *,
+        check: Optional[Callable[[RawThreadDeleteEvent], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawThreadDeleteEvent:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['thread_member_join', 'thread_member_remove'],
+        /,
+        *,
+        check: Optional[Callable[[ThreadMember], bool]],
+        timeout: Optional[float] = None,
+    ) -> ThreadMember:
+        ...
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['raw_thread_member_remove'],
+        /,
+        *,
+        check: Optional[Callable[[RawThreadMembersUpdate], bool]],
+        timeout: Optional[float] = None,
+    ) -> RawThreadMembersUpdate:
+        ...
+
+    # Voice
+
+    @overload
+    async def wait_for(
+        self,
+        event: Literal['voice_state_update'],
+        /,
+        *,
+        check: Optional[Callable[[Member, VoiceState, VoiceState], bool]],
+        timeout: Optional[float] = None,
+    ) -> Tuple[Member, VoiceState, VoiceState]:
+        ...
+
+    # Commands
+
+    @overload
+    async def wait_for(
+        self: Union[Bot, AutoShardedBot],
+        event: Literal["command", "command_completion"],
+        /,
+        *,
+        check: Optional[Callable[[Context], bool]] = None,
+        timeout: Optional[float] = None,
+    ) -> Context:
+        ...
+
+    @overload
+    async def wait_for(
+        self: Union[Bot, AutoShardedBot],
+        event: Literal["command_error"],
+        /,
+        *,
+        check: Optional[Callable[[Context, CommandError], bool]] = None,
+        timeout: Optional[float] = None,
+    ) -> Tuple[Context, CommandError]:
+        ...
+
+    @overload
+    async def wait_for(
         self,
         event: str,
         /,
@@ -1187,6 +1841,16 @@ class Client:
         check: Optional[Callable[..., bool]] = None,
         timeout: Optional[float] = None,
     ) -> Any:
+        ...
+
+    def wait_for(
+        self,
+        event: str,
+        /,
+        *,
+        check: Optional[Callable[..., bool]] = None,
+        timeout: Optional[float] = None,
+    ) -> Coro[Any]:
         """|coro|
 
         Waits for a WebSocket event to be dispatched.
@@ -1292,7 +1956,7 @@ class Client:
 
     # event registration
 
-    def event(self, coro: Coro, /) -> Coro:
+    def event(self, coro: CoroT, /) -> CoroT:
         """A decorator that registers an event to listen to.
 
         You can find more info about the events on the :ref:`documentation below <discord-api-events>`.
@@ -1493,21 +2157,23 @@ class Client:
             predicate = lambda m: int(m['id']) > after.id
 
         while True:
-            retrieve = min(200 if limit is None else limit, 200)
+            retrieve = 200 if limit is None else min(limit, 200)
             if retrieve < 1:
                 return
 
             data, state, limit = await strategy(retrieve, state, limit)
 
-            # Terminate loop on next iteration; there's no data left after this
-            if len(data) < 200:
-                limit = 0
-
             if predicate:
                 data = filter(predicate, data)
 
-            for raw_guild in data:
+            count = 0
+
+            for count, raw_guild in enumerate(data, 1):
                 yield Guild(state=self._connection, data=raw_guild)
+
+            if count < 200:
+                # There's no data left after this
+                break
 
     async def fetch_template(self, code: Union[Template, str]) -> Template:
         """|coro|
@@ -1743,7 +2409,7 @@ class Client:
 
         Revokes an :class:`.Invite`, URL, or ID to an invite.
 
-        You must have the :attr:`~.Permissions.manage_channels` permission in
+        You must have :attr:`~.Permissions.manage_channels` in
         the associated guild to do this.
 
         .. versionchanged:: 2.0
@@ -2033,7 +2699,7 @@ class Client:
         """
 
         if not isinstance(view, View):
-            raise TypeError(f'expected an instance of View not {view.__class__!r}')
+            raise TypeError(f'expected an instance of View not {view.__class__.__name__}')
 
         if not view.is_persistent():
             raise ValueError('View is not persistent. Items need to have a custom_id set and View must have no timeout')

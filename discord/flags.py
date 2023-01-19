@@ -290,6 +290,24 @@ class SystemChannelFlags(BaseFlags):
         """
         return 8
 
+    @flag_value
+    def role_subscription_purchase_notifications(self):
+        """:class:`bool`: Returns ``True`` if role subscription purchase and renewal
+        notifications are enabled.
+
+        .. versionadded:: 2.2
+        """
+        return 16
+
+    @flag_value
+    def role_subscription_purchase_notification_replies(self):
+        """:class:`bool`: Returns ``True`` if the role subscription notifications
+        have a sticker reply button.
+
+        .. versionadded:: 2.2
+        """
+        return 32
+
 
 @fill_with_flags()
 class MessageFlags(BaseFlags):
@@ -575,6 +593,14 @@ class PublicUserFlags(BaseFlags):
         """
         return UserFlags.spammer.value
 
+    @flag_value
+    def active_developer(self):
+        """:class:`bool`: Returns ``True`` if the user is an active developer.
+
+        .. versionadded:: 2.1
+        """
+        return UserFlags.active_developer.value
+
     def all(self) -> List[UserFlags]:
         """List[:class:`UserFlags`]: Returns all public flags the user has."""
         return [public_flag for public_flag in UserFlags if self._has_flag(public_flag.value)]
@@ -751,15 +777,25 @@ class Intents(BaseFlags):
         return 1 << 1
 
     @flag_value
-    def bans(self):
-        """:class:`bool`: Whether guild ban related events are enabled.
+    def moderation(self):
+        """:class:`bool`: Whether guild moderation related events are enabled.
 
         This corresponds to the following events:
 
         - :func:`on_member_ban`
         - :func:`on_member_unban`
+        - :func:`on_audit_log_entry_create`
 
         This does not correspond to any attributes or classes in the library in terms of cache.
+        """
+        return 1 << 2
+
+    @alias_flag_value
+    def bans(self):
+        """:class:`bool`: An alias of :attr:`moderation`.
+
+        .. versionchanged:: 2.2
+            Changed to an alias.
         """
         return 1 << 2
 
@@ -1426,6 +1462,15 @@ class ApplicationFlags(BaseFlags):
         command. This shows up as a badge in the official client."""
         return 1 << 23
 
+    @flag_value
+    def active(self):
+        """:class:`bool`: Returns ``True`` if the application has had at least one global application
+        command used in the last 30 days.
+
+        .. versionadded:: 2.1
+        """
+        return 1 << 24
+
 
 @fill_with_flags()
 class ChannelFlags(BaseFlags):
@@ -1489,6 +1534,15 @@ class ChannelFlags(BaseFlags):
     def pinned(self):
         """:class:`bool`: Returns ``True`` if the thread is pinned to the forum channel."""
         return 1 << 1
+
+    @flag_value
+    def require_tag(self):
+        """:class:`bool`: Returns ``True`` if a tag is required to be specified when creating a thread
+        in a :class:`ForumChannel`.
+
+        .. versionadded:: 2.1
+        """
+        return 1 << 4
 
 
 class ArrayFlags(BaseFlags):

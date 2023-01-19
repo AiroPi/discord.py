@@ -65,14 +65,23 @@ AutoModerationAction = Union[_AutoModerationActionBlockMessage, _AutoModerationA
 
 class _AutoModerationTriggerMetadataKeyword(TypedDict):
     keyword_filter: List[str]
+    regex_patterns: NotRequired[List[str]]
 
 
 class _AutoModerationTriggerMetadataKeywordPreset(TypedDict):
     presets: List[AutoModerationTriggerPresets]
+    allow_list: List[str]
+
+
+class _AutoModerationTriggerMetadataMentionLimit(TypedDict):
+    mention_total_limit: int
 
 
 AutoModerationTriggerMetadata = Union[
-    _AutoModerationTriggerMetadataKeyword, _AutoModerationTriggerMetadataKeywordPreset, Empty
+    _AutoModerationTriggerMetadataKeyword,
+    _AutoModerationTriggerMetadataKeywordPreset,
+    _AutoModerationTriggerMetadataMentionLimit,
+    Empty,
 ]
 
 
